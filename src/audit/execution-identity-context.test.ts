@@ -183,6 +183,40 @@ function recordDeniedApprovalForRun(
 }
 
 describe("execution identity context storage", () => {
+  it("preserves private spawn facts across the prepared-admission copy", () => {
+    const context = prepareExecutionIdentityContextAtAdmission(
+      {
+        ...facts("copied-child-run", {
+          spawnLineage: {
+            parentContextId: "copied-parent-context",
+            parentExecutionId: "copied-parent-execution",
+            parentRunId: "copied-parent-run",
+            parentAgentId: "parent-agent",
+            relation: "sessions_spawn",
+            rawRequesterRef: "requester",
+            rawControllerRef: "controller",
+            depth: 1,
+            localPolicyRefs: [],
+            targetPolicyRefs: [],
+          },
+        }),
+      },
+      {
+        ...databaseOptions(),
+        contextId: "copied-child-context",
+        executionId: "copied-child-execution",
+        now: 100,
+      },
+    );
+
+    expect(context.lineage).toMatchObject({
+      parentContextId: "copied-parent-context",
+      parentExecutionId: "copied-parent-execution",
+      parentRunId: "copied-parent-run",
+      depth: 1,
+    });
+  });
+
   it("projects bounded child lineage and narrowing inputs without retaining raw owner refs", () => {
     const database = databaseOptions();
     const context = prepareExecutionIdentityContextAtAdmission(

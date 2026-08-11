@@ -1,23 +1,47 @@
-// @ts-nocheck
-// TypeScript's body checker structurally interns this private lineage tuple into the unrelated
-// public V1 validator declaration and reorders its properties. Runtime checks below own this seam.
 const EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS = Symbol("executionIdentitySpawnAdmissionFacts");
 
 type ExecutionIdentitySpawnAdmissionCarrier = {
   [EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS]?: string;
 };
 
-// Keep this private carrier as one dependency-free declaration. Additional exported declarations
-// perturb whole-program Plugin SDK declaration traversal even though this module is not public.
+type ExecutionIdentitySpawnLineage = {
+  parentContextId?: string;
+  parentExecutionId?: string;
+  parentRunId?: string;
+  parentAgentId: string;
+  relation: "sessions_spawn";
+  rawRequesterRef: string;
+  rawControllerRef: string;
+  depth: number;
+  localPolicyRefs: string[];
+  targetPolicyRefs: string[];
+};
+
+type ExecutionIdentitySpawnAdmissionExtension = {
+  lineage?: ExecutionIdentitySpawnLineage;
+  missingEvidence: string[];
+};
+
+type ExecutionIdentitySpawnAdmissionInput =
+  | { operation: "serialize"; value: unknown; extra: unknown }
+  | { operation: "parse"; value: unknown }
+  | { operation: "attach"; value: unknown; extra?: unknown }
+  | { operation: "extend-envelope"; value: unknown; extra?: unknown }
+  | { operation: "base-envelope"; value: unknown }
+  | { operation: "read"; value: unknown };
+
 function isCarrierRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function validRef(value, maxLength) {
+function validRef(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.length >= 1 && value.length <= maxLength;
 }
 
-function validateEnvelopeExtension(lineage, missingEvidence) {
+function validateEnvelopeExtension(
+  lineage: unknown,
+  missingEvidence: unknown,
+): ExecutionIdentitySpawnAdmissionExtension {
   if (
     !Array.isArray(missingEvidence) ||
     missingEvidence.length > 16 ||
@@ -25,8 +49,8 @@ function validateEnvelopeExtension(lineage, missingEvidence) {
   ) {
     throw new Error("execution identity spawn missing-evidence facts are invalid");
   }
-  if (lineage === undefined) {
-    return;
+  if (lineage === undefined || lineage === null) {
+    return { missingEvidence };
   }
   if (
     !isCarrierRecord(lineage) ||
@@ -38,6 +62,7 @@ function validateEnvelopeExtension(lineage, missingEvidence) {
     !validRef(lineage.rawRequesterRef, 4_096) ||
     !validRef(lineage.rawControllerRef, 4_096) ||
     !Number.isSafeInteger(lineage.depth) ||
+    typeof lineage.depth !== "number" ||
     lineage.depth < 1 ||
     lineage.depth > 64 ||
     !Array.isArray(lineage.localPolicyRefs) ||
@@ -49,55 +74,67 @@ function validateEnvelopeExtension(lineage, missingEvidence) {
   ) {
     throw new Error("execution identity spawn lineage facts are invalid");
   }
+  return {
+    lineage: {
+      ...(lineage.parentContextId !== undefined
+        ? { parentContextId: lineage.parentContextId }
+        : {}),
+      ...(lineage.parentExecutionId !== undefined
+        ? { parentExecutionId: lineage.parentExecutionId }
+        : {}),
+      ...(lineage.parentRunId !== undefined ? { parentRunId: lineage.parentRunId } : {}),
+      parentAgentId: lineage.parentAgentId,
+      relation: lineage.relation,
+      rawRequesterRef: lineage.rawRequesterRef,
+      rawControllerRef: lineage.rawControllerRef,
+      depth: lineage.depth,
+      localPolicyRefs: lineage.localPolicyRefs,
+      targetPolicyRefs: lineage.targetPolicyRefs,
+    },
+    missingEvidence,
+  };
 }
 
-function uniqueSorted(values) {
+function uniqueSorted(values: readonly string[]): string[] {
   return [...new Set(values)].toSorted();
 }
 
+// The broad return keeps this private module out of the public Plugin SDK declaration closure.
+// Every operation is checked below against the discriminated input and bounded runtime contract.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function executionIdentitySpawnAdmission(input: object): any {
-  const { operation, value, extra } = input as {
-    operation?: unknown;
-    value?: unknown;
-    extra?: unknown;
-  };
+  const operationInput = input as ExecutionIdentitySpawnAdmissionInput;
+  const { operation, value } = operationInput;
   if (operation === "serialize") {
-    if (!Array.isArray(extra) || !extra.every((item) => typeof item === "string")) {
-      throw new Error("execution identity spawn missing-evidence facts are invalid");
-    }
-    return JSON.stringify([isCarrierRecord(value) ? value : null, extra]);
+    const extension = validateEnvelopeExtension(value, operationInput.extra);
+    return JSON.stringify([extension.lineage ?? null, extension.missingEvidence]);
   }
   if (operation === "parse") {
     if (typeof value !== "string") {
       throw new Error("execution identity spawn admission facts are invalid");
     }
     const parsed: unknown = JSON.parse(value);
-    if (
-      !Array.isArray(parsed) ||
-      parsed.length !== 2 ||
-      (parsed[0] !== null && !isCarrierRecord(parsed[0])) ||
-      !Array.isArray(parsed[1]) ||
-      !parsed[1].every((item) => typeof item === "string")
-    ) {
+    if (!Array.isArray(parsed) || parsed.length !== 2) {
       throw new Error("execution identity spawn admission facts are invalid");
     }
-    return [parsed[0] ?? undefined, parsed[1]];
+    const extension = validateEnvelopeExtension(parsed[0], parsed[1]);
+    return [extension.lineage, extension.missingEvidence];
   }
   if (!isCarrierRecord(value)) {
     throw new Error("execution identity spawn admission carrier is invalid");
   }
   if (operation === "attach") {
-    return typeof extra === "string"
-      ? { ...value, [EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS]: extra }
+    return typeof operationInput.extra === "string"
+      ? { ...value, [EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS]: operationInput.extra }
       : value;
   }
   if (operation === "extend-envelope") {
-    const serialized = typeof extra === "string" ? extra : JSON.stringify([null, []]);
+    const serialized =
+      typeof operationInput.extra === "string" ? operationInput.extra : JSON.stringify([null, []]);
     const [lineage, missingEvidence] = executionIdentitySpawnAdmission({
       operation: "parse",
       value: serialized,
-    });
-    validateEnvelopeExtension(lineage, missingEvidence);
+    }) as readonly [ExecutionIdentitySpawnLineage | undefined, string[]];
     const normalizedLineage = lineage
       ? {
           ...lineage,
@@ -116,20 +153,15 @@ export function executionIdentitySpawnAdmission(input: object): any {
     validateEnvelopeExtension(lineage, missingEvidence);
     return baseEnvelope;
   }
-  if (operation === "read") {
-    const attached = (value as ExecutionIdentitySpawnAdmissionCarrier)[
-      EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS
-    ];
-    if (attached) {
-      return attached;
-    }
-    const cloned = value as { lineage?: unknown; missingEvidence?: unknown };
-    return Array.isArray(cloned.missingEvidence)
-      ? JSON.stringify([
-          isCarrierRecord(cloned.lineage) ? cloned.lineage : null,
-          cloned.missingEvidence,
-        ])
-      : undefined;
+  const attached = (value as ExecutionIdentitySpawnAdmissionCarrier)[
+    EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS
+  ];
+  if (attached) {
+    return attached;
   }
-  throw new Error(`unknown execution identity spawn admission operation: ${operation}`);
+  if (!Array.isArray(value.missingEvidence)) {
+    return undefined;
+  }
+  const extension = validateEnvelopeExtension(value.lineage, value.missingEvidence);
+  return JSON.stringify([extension.lineage ?? null, extension.missingEvidence]);
 }
