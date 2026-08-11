@@ -9,6 +9,7 @@ import {
   WORKER_PROTOCOL_MAX_FRAME_ID_LENGTH,
   WORKER_PROTOCOL_MAX_PAYLOAD_BYTES,
 } from "../../../packages/gateway-protocol/src/schema/worker-protocol-primitives.js";
+import { withGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
 import {
   callAgentToolGatewayRequest,
   callInProcessGatewayToolWithCreation,
@@ -26,6 +27,7 @@ import { WORKER_TOOL_NAMES } from "../../worker/tool-authority.js";
 import { loadGatewaySessionEntryReadOnly } from "../session-utils.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import type { WorkerSessionPlacementStore } from "./placement-store.js";
+import { readWorkerTurnExecutionIdentity } from "./placement-turn-claim-events.js";
 import type { WorkerPlacementDispatchContract } from "./service-contract.js";
 import type { WorkerEnvironmentService } from "./service.js";
 import {
@@ -354,17 +356,32 @@ export function createWorkerSessionToolExecutor(params: {
       expectedParentSessionId: operation.source.sessionId,
       ...(operation.signal ? { signal: operation.signal } : {}),
     });
-    return await tool.execute(operation.request.toolCallId, {
-      task: operation.request.task,
-      ...(operation.request.label ? { label: operation.request.label } : {}),
-      ...(operation.request.agentId ? { agentId: operation.request.agentId } : {}),
-      ...(operation.request.model ? { model: operation.request.model } : {}),
-      ...(operation.request.runTimeoutSeconds === undefined
-        ? {}
-        : { runTimeoutSeconds: operation.request.runTimeoutSeconds }),
-      visible: true,
-      worktree: true,
-    });
+    const executeSpawn = () =>
+      tool.execute(operation.request.toolCallId, {
+        task: operation.request.task,
+        ...(operation.request.label ? { label: operation.request.label } : {}),
+        ...(operation.request.agentId ? { agentId: operation.request.agentId } : {}),
+        ...(operation.request.model ? { model: operation.request.model } : {}),
+        ...(operation.request.runTimeoutSeconds === undefined
+          ? {}
+          : { runTimeoutSeconds: operation.request.runTimeoutSeconds }),
+        visible: true,
+        worktree: true,
+      });
+    const parentExecutionIdentityToken = readWorkerTurnExecutionIdentity(
+      params.placements,
+      operation.source.binding,
+    );
+    return parentExecutionIdentityToken
+      ? await withGatewayToolCallerIdentity(
+          {
+            agentId: operation.source.agentId,
+            sessionKey: operation.source.sessionKey,
+            executionIdentityToken: parentExecutionIdentityToken,
+          },
+          executeSpawn,
+        )
+      : await executeSpawn();
   };
 
   const send = async (operation: {

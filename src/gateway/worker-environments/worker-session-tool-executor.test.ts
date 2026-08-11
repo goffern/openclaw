@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -13,6 +14,7 @@ import {
   createWorkerSessionPlacementStore,
   type WorkerSessionPlacementStore,
 } from "./placement-store.js";
+import { bindWorkerTurnExecutionIdentity } from "./placement-turn-claim-events.js";
 import { createWorkerSessionToolExecutor } from "./worker-session-tool-executor.js";
 
 const sessionEntries = vi.hoisted(() => new Map<string, SessionEntry>());
@@ -20,6 +22,7 @@ const delivered = vi.hoisted(() => vi.fn());
 const gatewayRequest = vi.hoisted(() => vi.fn());
 const gatewayCreate = vi.hoisted(() => vi.fn());
 const dispatchChild = vi.hoisted(() => vi.fn());
+const spawnCallerIdentity = vi.hoisted(() => vi.fn());
 const scopedSessionAccess = vi.hoisted(() =>
   vi.fn(async (params: { run: () => Promise<unknown> }) => await params.run()),
 );
@@ -47,23 +50,28 @@ vi.mock("../../agents/tools/sessions-send-tool.js", () => ({
   }),
 }));
 
-vi.mock("../../agents/tools/sessions-spawn-tool.js", () => ({
-  createSessionsSpawnTool: (options: {
-    agentSessionKey: string;
-    callGateway: (method: string, params: Record<string, unknown>) => Promise<unknown>;
-  }) => ({
-    execute: async (_toolCallId: string, args: { task: string }) => {
-      const details = await options.callGateway("sessions.create", {
-        parentSessionKey: options.agentSessionKey,
-        task: args.task,
-      });
-      return {
-        content: [{ type: "text", text: "spawned" }],
-        details,
-      };
-    },
-  }),
-}));
+vi.mock("../../agents/tools/sessions-spawn-tool.js", async () => {
+  const { getGatewayToolCallerIdentity } =
+    await import("../../agents/tools/gateway-caller-context.js");
+  return {
+    createSessionsSpawnTool: (options: {
+      agentSessionKey: string;
+      callGateway: (method: string, params: Record<string, unknown>) => Promise<unknown>;
+    }) => ({
+      execute: async (_toolCallId: string, args: { task: string }) => {
+        spawnCallerIdentity(getGatewayToolCallerIdentity());
+        const details = await options.callGateway("sessions.create", {
+          parentSessionKey: options.agentSessionKey,
+          task: args.task,
+        });
+        return {
+          content: [{ type: "text", text: "spawned" }],
+          details,
+        };
+      },
+    }),
+  };
+});
 
 vi.mock("../../agents/tools/scoped-session-access.js", () => ({
   runWithScopedSessionAccess: (params: unknown) => scopedSessionAccess(params as never),
@@ -108,6 +116,13 @@ const GRANDCHILD = {
   environmentId: "spawned-grandchild-environment",
   ownerEpoch: 6,
 };
+const PARENT_EXECUTION_IDENTITY_TOKEN = {
+  tokenVersion: 1,
+  contextId: "parent-context",
+  executionId: "parent-execution",
+  runId: "source-run",
+  createdAt: 1,
+} satisfies ExecutionIdentityAdmissionToken;
 
 describe("worker session tool topology", () => {
   let root: string;
@@ -138,6 +153,7 @@ describe("worker session tool topology", () => {
       },
     });
     placements.authorizeWorkerTurnTools(sourceClaim, ["sessions_send", "sessions_spawn"]);
+    bindWorkerTurnExecutionIdentity(placements, sourceClaim, PARENT_EXECUTION_IDENTITY_TOKEN);
     identity = {
       environmentId: SOURCE.environmentId,
       credentialHash: "credential-hash",
@@ -155,6 +171,7 @@ describe("worker session tool topology", () => {
     gatewayRequest.mockReset();
     gatewayCreate.mockReset();
     dispatchChild.mockReset();
+    spawnCallerIdentity.mockReset();
     scopedSessionAccess.mockClear();
     childSessionKey = undefined;
     spawnOrder = [];
@@ -352,6 +369,24 @@ describe("worker session tool topology", () => {
     expect(replay.resultJson).toBe(first.resultJson);
   });
 
+  it("carries the exact admitted parent identity into a worker-hosted child spawn", async () => {
+    setEntry(SOURCE.sessionKey, SOURCE.sessionId);
+
+    await execute({
+      identity,
+      toolName: "sessions_spawn",
+      request: { toolCallId: "spawn-with-parent-identity", task: "start the child" },
+    });
+
+    expect(spawnCallerIdentity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: SOURCE.agentId,
+        sessionKey: SOURCE.sessionKey,
+        executionIdentityToken: PARENT_EXECUTION_IDENTITY_TOKEN,
+      }),
+    );
+  });
+
   it("coalesces concurrent spawn retries into one cloud child", async () => {
     setEntry(SOURCE.sessionKey, SOURCE.sessionId);
     const create = gatewayCreate.getMockImplementation();
@@ -501,6 +536,14 @@ describe("worker session tool topology", () => {
       },
     });
     placements.authorizeWorkerTurnTools(childClaim, ["sessions_spawn", "sessions_send"]);
+    const childExecutionIdentityToken = {
+      ...PARENT_EXECUTION_IDENTITY_TOKEN,
+      contextId: "child-context",
+      executionId: "child-execution",
+      runId: childClaim.runId,
+      createdAt: 2,
+    } satisfies ExecutionIdentityAdmissionToken;
+    bindWorkerTurnExecutionIdentity(placements, childClaim, childExecutionIdentityToken);
     const childIdentity: WorkerConnectionIdentity = {
       ...identity,
       environmentId: CHILD.environmentId,
@@ -542,6 +585,10 @@ describe("worker session tool topology", () => {
       toolName: "sessions_spawn",
       request: { toolCallId: "spawn-grandchild", task: "start the grandchild" },
     });
+    expect(spawnCallerIdentity.mock.calls.map((call) => call[0]?.executionIdentityToken)).toEqual([
+      PARENT_EXECUTION_IDENTITY_TOKEN,
+      childExecutionIdentityToken,
+    ]);
     expect(sessionEntries.get(spawnedGrandchildKey!)).toMatchObject({
       parentSessionKey: spawnedChildKey,
       parentSessionId: CHILD.sessionId,

@@ -201,6 +201,7 @@ async function executeWorkerTurn(params: {
   const { operationalRunInstance, runtimeIdentity } = await prepareWorkerAgentRuntimeIdentity({
     agentId: placement.agentId,
     runtimeInstanceId: placement.environmentId,
+    placements: params.placements,
     sessionKey: placement.sessionKey,
     turn,
     turnClaim: params.turnClaim,

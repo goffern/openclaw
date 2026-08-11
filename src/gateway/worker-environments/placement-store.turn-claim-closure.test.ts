@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
@@ -12,6 +13,10 @@ import {
   createWorkerSessionPlacementStore,
   type WorkerSessionPlacementStore,
 } from "./placement-store.js";
+import {
+  bindWorkerTurnExecutionIdentity,
+  readWorkerTurnExecutionIdentity,
+} from "./placement-turn-claim-events.js";
 
 const SESSION: WorkerSessionPlacementIdentity = {
   sessionId: "session-placement-claim-close",
@@ -88,7 +93,25 @@ it("emits exact worker claim closure after release and owner fencing", () => {
     claimId: "claim-release",
     runId: "run-release",
   });
+  const firstIdentity = createExecutionIdentityAdmissionToken(first.runId);
+  bindWorkerTurnExecutionIdentity(store, first, firstIdentity);
+  expect(
+    readWorkerTurnExecutionIdentity(store, {
+      sessionId: first.sessionId,
+      environmentId: owner.environmentId,
+      ownerEpoch: owner.ownerEpoch,
+      runId: first.runId,
+    }),
+  ).toBe(firstIdentity);
   store.releaseTurn(first);
+  expect(
+    readWorkerTurnExecutionIdentity(store, {
+      sessionId: first.sessionId,
+      environmentId: owner.environmentId,
+      ownerEpoch: owner.ownerEpoch,
+      runId: first.runId,
+    }),
+  ).toBeUndefined();
   expect(closed).toHaveBeenLastCalledWith(first);
 
   const second = store.claimTurn({
@@ -97,6 +120,11 @@ it("emits exact worker claim closure after release and owner fencing", () => {
     claimId: "claim-fence",
     runId: "run-fence",
   });
+  bindWorkerTurnExecutionIdentity(
+    store,
+    second,
+    createExecutionIdentityAdmissionToken(second.runId),
+  );
   const draining = store.startDrain({
     sessionId: active.sessionId,
     environmentId: active.environmentId,
@@ -109,6 +137,14 @@ it("emits exact worker claim closure after release and owner fencing", () => {
     ownerEpoch: active.activeOwnerEpoch,
     expectedGeneration: draining.generation,
   });
+  expect(
+    readWorkerTurnExecutionIdentity(store, {
+      sessionId: second.sessionId,
+      environmentId: owner.environmentId,
+      ownerEpoch: owner.ownerEpoch,
+      runId: second.runId,
+    }),
+  ).toBeUndefined();
   expect(closed).toHaveBeenLastCalledWith(second);
   expect(closed).toHaveBeenCalledTimes(2);
   unregister();

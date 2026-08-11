@@ -1,3 +1,4 @@
+import type { ExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
 import { resolveGlobalMap } from "../../shared/global-singleton.js";
 import type { WorkerSessionTurnClaim } from "./placement-record.js";
 
@@ -24,6 +25,67 @@ const workerTurnClaimClosedHandlers = resolveGlobalMap<
 >(Symbol.for("openclaw.workerTurnClaimClosedHandlers"), (handlersByPath) => {
   handlersByPath.clear();
 });
+
+const workerTurnExecutionIdentities = resolveGlobalMap<
+  string,
+  Map<
+    string,
+    { claim: WorkerSessionTurnClaim; claimKey: string; token: ExecutionIdentityAdmissionToken }
+  >
+>(Symbol.for("openclaw.workerTurnExecutionIdentities"), (identities) => identities.clear());
+
+const WORKER_TURN_EXECUTION_IDENTITY_PATH = Symbol("workerTurnExecutionIdentityPath");
+type WorkerTurnExecutionIdentityStore = {
+  validateTurnClaim(claim: WorkerSessionTurnClaim): boolean;
+  [WORKER_TURN_EXECUTION_IDENTITY_PATH]?: string;
+};
+
+function claimKey(claim: WorkerSessionTurnClaim): string {
+  return JSON.stringify([
+    claim.claimId,
+    claim.runId,
+    claim.placementGeneration,
+    claim.owner.kind,
+    claim.owner.kind === "worker" ? claim.owner.environmentId : null,
+    claim.owner.kind === "worker" ? claim.owner.ownerEpoch : null,
+  ]);
+}
+
+/** Bind diagnostic provenance to the exact live worker claim; it grants no authority. */
+export function bindWorkerTurnExecutionIdentity(
+  store: WorkerTurnExecutionIdentityStore,
+  claim: WorkerSessionTurnClaim,
+  token: ExecutionIdentityAdmissionToken,
+): void {
+  const path = store[WORKER_TURN_EXECUTION_IDENTITY_PATH];
+  if (!path || !store.validateTurnClaim(claim)) {
+    throw new Error(`Session ${claim.sessionId} worker turn authority changed`);
+  }
+  const identities = workerTurnExecutionIdentities.get(path) ?? new Map();
+  identities.set(claim.sessionId, { claim, claimKey: claimKey(claim), token });
+  workerTurnExecutionIdentities.set(path, identities);
+}
+
+export function readWorkerTurnExecutionIdentity(
+  store: WorkerTurnExecutionIdentityStore,
+  binding: { sessionId: string; environmentId: string; ownerEpoch: number; runId: string },
+): ExecutionIdentityAdmissionToken | undefined {
+  const path = store[WORKER_TURN_EXECUTION_IDENTITY_PATH];
+  const bound = path ? workerTurnExecutionIdentities.get(path)?.get(binding.sessionId) : undefined;
+  const owner = bound?.claim.owner;
+  return bound &&
+    owner?.kind === "worker" &&
+    bound.claim.runId === binding.runId &&
+    owner.environmentId === binding.environmentId &&
+    owner.ownerEpoch === binding.ownerEpoch &&
+    store.validateTurnClaim(bound.claim)
+    ? bound.token
+    : undefined;
+}
+
+export function attachWorkerTurnExecutionIdentityStore(store: object, path: string): void {
+  Object.defineProperty(store, WORKER_TURN_EXECUTION_IDENTITY_PATH, { value: path });
+}
 
 export function waitersFor(path: string, sessionId: string): Set<TurnClaimReleaseWaiter> {
   let bySession = turnClaimReleaseWaiters.get(path);
@@ -90,6 +152,13 @@ export function registerWorkerTurnClaimClosedHandler(
 
 export function signalWorkerTurnClaimClosed(path: string, claim: WorkerSessionTurnClaim): void {
   signalTurnClaimRelease(path, claim.sessionId);
+  const identities = workerTurnExecutionIdentities.get(path);
+  if (identities?.get(claim.sessionId)?.claimKey === claimKey(claim)) {
+    identities.delete(claim.sessionId);
+    if (identities.size === 0) {
+      workerTurnExecutionIdentities.delete(path);
+    }
+  }
   for (const handler of workerTurnClaimClosedHandlers.get(path) ?? []) {
     try {
       handler(claim);
