@@ -1,7 +1,15 @@
+import type { AgentRuntimeIdentity } from "../../../gateway/agent-runtime-identity-token.js";
+import { withInProcessAgentRuntimeIdentity } from "../../../gateway/in-process-agent-runtime-identity.js";
+import { getActiveAgentRunDelegatedAuthority } from "../../../infra/agent-run-registry.js";
+import { getGatewayToolCallerIdentity } from "../../tools/gateway-caller-context.js";
+import { runWithGatewaySessionSpawnContext } from "../../tools/gateway-session-spawn-context.js";
+import { runWithGatewaySessionSpawnParentExecutionIdentity } from "../../tools/gateway-session-spawn-execution-identity.js";
+import { callGatewayTool } from "../../tools/gateway.js";
 import { resolveSubagentRunTimerDelayMs } from "../registry/subagent-run-timeout.js";
 import type { SubagentLaunchAuthorization } from "./subagent-launch-authorization.js";
 import { applySubagentLaunchAuthorization } from "./subagent-launch-authorization.js";
 import { getSubagentSpawnDeps } from "./subagent-spawn-deps.js";
+import { readSubagentGatewayExecutionIdentity } from "./subagent-spawn-execution-identity.js";
 import {
   ADMIN_SCOPE,
   callGateway,
@@ -19,6 +27,8 @@ async function callSubagentGatewayWithDispatchMode(
   authorization?: SubagentLaunchAuthorization,
   options?: { agentRunTracking?: "native_subagent" },
 ): Promise<{ response: SubagentGatewayResponse; dispatchMode: SubagentGatewayDispatchMode }> {
+  const { sessionSpawnContext, parentExecutionIdentityToken } =
+    readSubagentGatewayExecutionIdentity(params) ?? {};
   // Subagent lifecycle requires methods spanning multiple scope tiers
   // (sessions.delete → admin, agent → write). When each call
   // independently negotiates least-privilege scopes the first connection pairs
@@ -63,21 +73,60 @@ async function callSubagentGatewayWithDispatchMode(
     // Reusing that external identity makes collector preflight treat the launch as spoofed.
     const isChildRunLaunch = request.method === "agent";
     const forceSyntheticClient = isChildRunLaunch || scopes != null;
+    const caller = getGatewayToolCallerIdentity();
+    const activeAuthority = caller?.operationalRunInstance
+      ? getActiveAgentRunDelegatedAuthority(caller.operationalRunInstance)
+      : undefined;
+    const agentRuntimeIdentity: AgentRuntimeIdentity | undefined =
+      sessionSpawnContext && caller?.operationalRunInstance && activeAuthority
+        ? {
+            kind: "agentRuntime",
+            agentId: caller.agentId,
+            sessionKey: caller.sessionKey,
+            operationalRunInstance: caller.operationalRunInstance,
+            delegatedAuthority: { kind: "local", ...activeAuthority },
+            ...(parentExecutionIdentityToken
+              ? { executionIdentity: parentExecutionIdentityToken }
+              : {}),
+            sessionSpawnContext,
+          }
+        : undefined;
     const response = await deps.dispatchGatewayMethodInProcess(
       request.method,
       request.params as Record<string, unknown>,
-      {
-        expectFinal: request.expectFinal,
-        ...(allowModelOverride ? { allowSyntheticModelOverride: true } : {}),
-        ...(options?.agentRunTracking ? { agentRunTracking: options.agentRunTracking } : {}),
-        ...(forceSyntheticClient ? { forceSyntheticClient: true } : {}),
-        ...(typeof request.timeoutMs === "number" ? { timeoutMs: request.timeoutMs } : {}),
-        ...(scopes != null ? { syntheticScopes: scopes } : {}),
-      },
+      withInProcessAgentRuntimeIdentity(
+        {
+          expectFinal: request.expectFinal,
+          ...(allowModelOverride ? { allowSyntheticModelOverride: true } : {}),
+          ...(options?.agentRunTracking ? { agentRunTracking: options.agentRunTracking } : {}),
+          ...(forceSyntheticClient ? { forceSyntheticClient: true } : {}),
+          ...(typeof request.timeoutMs === "number" ? { timeoutMs: request.timeoutMs } : {}),
+          ...(scopes != null ? { syntheticScopes: scopes } : {}),
+        },
+        agentRuntimeIdentity,
+      ),
     );
     return { response, dispatchMode: "in_process" };
   }
-  return { response: await deps.callGateway(request), dispatchMode: "out_of_process" };
+  const response = sessionSpawnContext
+    ? await runWithGatewaySessionSpawnContext(sessionSpawnContext, () =>
+        runWithGatewaySessionSpawnParentExecutionIdentity(parentExecutionIdentityToken, () =>
+          callGatewayTool(
+            request.method,
+            {
+              ...(typeof request.timeoutMs === "number" ? { timeoutMs: request.timeoutMs } : {}),
+            },
+            request.params,
+            {
+              expectFinal: request.expectFinal,
+              scopes,
+              requireAgentRuntimeIdentity: true,
+            },
+          ),
+        ),
+      )
+    : await deps.callGateway(request);
+  return { response, dispatchMode: "out_of_process" };
 }
 
 export async function callSubagentGateway(

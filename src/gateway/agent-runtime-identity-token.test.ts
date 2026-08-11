@@ -14,6 +14,7 @@ import { readExecApprovalsSnapshot } from "../infra/exec-approvals-store.js";
 import { testing as execApprovalsStoreTesting } from "../infra/exec-approvals-store.test-support.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { captureEnv, setTestEnvValue } from "../test-utils/env.js";
+import { withAgentRuntimeExecutionLineage } from "./agent-runtime-execution-lineage.js";
 
 const envSnapshot = captureEnv(["HOME", "OPENCLAW_HOME", "OPENCLAW_STATE_DIR"]);
 
@@ -270,30 +271,60 @@ describe("agent runtime identity token", () => {
   it("round-trips a signed visible-session spawn policy", async () => {
     useTempHome();
     const runtimeToken = await importRuntimeTokenModule();
+    const parentExecutionIdentity = createExecutionIdentityAdmissionToken("run-1", {
+      contextId: "parent-context",
+      executionId: "parent-execution",
+    });
     const token = await runtimeToken.mintAgentRuntimeIdentityToken({
       agentId: "main",
       sessionKey: "agent:main:main",
       ...operationalRun(),
-      sessionSpawnContext: {
-        completionOwnerSessionKey: " agent:main:discord:direct:alice ",
-        inheritedToolPolicy: {
-          version: 1,
-          allow: [" read ", "sessions_spawn"],
-          deny: ["exec"],
+      executionIdentityToken: parentExecutionIdentity,
+      sessionSpawnContext: withAgentRuntimeExecutionLineage(
+        {
+          completionOwnerSessionKey: " agent:main:discord:direct:alice ",
+          inheritedToolPolicy: {
+            version: 1,
+            allow: [" read ", "sessions_spawn"],
+            deny: ["exec"],
+          },
         },
-      },
+        {
+          relation: "sessions_spawn",
+          requesterRef: "agent:main:main",
+          controllerRef: "agent:main:main",
+          depth: 2,
+          applicableGrantRefs: ["tool:sessions_spawn"],
+          localPolicyRefs: ["local-policy"],
+          runtimeAssuranceRefs: ["spawn-runtime:subagent"],
+          targetPolicyRefs: ["target-policy"],
+          externalNativeActions: "observable",
+        },
+      ),
     });
 
     await expect(runtimeToken.verifyAgentRuntimeIdentityToken(token)).resolves.toMatchObject({
       kind: "agentRuntime",
       agentId: "main",
       sessionKey: "agent:main:main",
+      executionIdentity: parentExecutionIdentity,
       sessionSpawnContext: {
         completionOwnerSessionKey: "agent:main:discord:direct:alice",
         inheritedToolPolicy: {
           version: 1,
           allow: ["read", "sessions_spawn"],
           deny: ["exec"],
+        },
+        executionLineage: {
+          relation: "sessions_spawn",
+          requesterRef: "agent:main:main",
+          controllerRef: "agent:main:main",
+          depth: 2,
+          applicableGrantRefs: ["tool:sessions_spawn"],
+          localPolicyRefs: ["local-policy"],
+          runtimeAssuranceRefs: ["spawn-runtime:subagent"],
+          targetPolicyRefs: ["target-policy"],
+          externalNativeActions: "observable",
         },
       },
     });

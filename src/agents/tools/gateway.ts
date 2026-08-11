@@ -33,6 +33,7 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import { readPositiveIntegerParam, readToolStringParam } from "./common.js";
 import { getGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import { getGatewaySessionSpawnContext } from "./gateway-session-spawn-context.js";
+import { getGatewaySessionSpawnParentExecutionIdentityToken } from "./gateway-session-spawn-execution-identity.js";
 
 /** Optional gateway connection overrides accepted by agent tools. */
 export type GatewayCallOptions = {
@@ -384,9 +385,11 @@ async function resolveAgentRuntimeIdentityTokenForGatewayTool(params: {
   }
   try {
     const sessionSpawnContext = getGatewaySessionSpawnContext();
+    const parentExecutionIdentityToken = getGatewaySessionSpawnParentExecutionIdentityToken();
     return await mintAgentRuntimeIdentityToken({
       ...identity,
       operationalRunInstance: identity.operationalRunInstance,
+      ...(sessionSpawnContext ? { executionIdentityToken: parentExecutionIdentityToken } : {}),
       ...(sessionSpawnContext ? { sessionSpawnContext } : {}),
     });
   } catch (error) {

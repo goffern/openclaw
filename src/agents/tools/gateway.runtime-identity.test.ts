@@ -1,6 +1,7 @@
 // Gateway tool runtime-identity tests keep current-turn authority fail closed.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
+import { withAgentRuntimeExecutionLineage } from "../../gateway/agent-runtime-execution-lineage.js";
 import { verifyAgentRuntimeIdentityToken } from "../../gateway/agent-runtime-identity-token.js";
 import type { CallGatewayOptions } from "../../gateway/call.js";
 import {
@@ -18,6 +19,7 @@ import {
   withGatewayToolCallerIdentity,
 } from "./gateway-caller-context.js";
 import { runWithGatewaySessionSpawnContext } from "./gateway-session-spawn-context.js";
+import { runWithGatewaySessionSpawnParentExecutionIdentity } from "./gateway-session-spawn-execution-identity.js";
 import { callGatewayTool, resolveMessageActionAgentRuntimeIdentityToken } from "./gateway.js";
 
 const mocks = vi.hoisted(() => ({
@@ -100,12 +102,17 @@ describe("gateway tool runtime identity", () => {
 
   it("scopes signed session-spawn authority to its Gateway call", async () => {
     mocks.callGateway.mockResolvedValueOnce({ key: "agent:ops:dashboard:child" });
+    const parentExecutionIdentity = createExecutionIdentityAdmissionToken("run-1", {
+      contextId: "parent-context",
+      executionId: "parent-execution",
+    });
 
     await withActiveGatewayToolCallerIdentity(
       {
         agentId: "ops",
         sessionKey: "agent:ops:main",
         operationalRunInstance: createOperationalRunInstanceRef("run-1"),
+        executionIdentityToken: parentExecutionIdentity,
       },
       async () =>
         await runWithGatewaySessionSpawnContext(
@@ -113,6 +120,58 @@ describe("gateway tool runtime identity", () => {
             completionOwnerSessionKey: "agent:ops:discord:direct:alice",
             inheritedToolPolicy: { version: 1, allow: ["read"], deny: ["exec"] },
           },
+          () =>
+            runWithGatewaySessionSpawnParentExecutionIdentity(parentExecutionIdentity, () =>
+              callGatewayTool(
+                "sessions.create",
+                {},
+                { parentSessionKey: "agent:ops:main", spawnDepth: 1 },
+                { requireAgentRuntimeIdentity: true },
+              ),
+            ),
+        ),
+    );
+
+    await expect(
+      verifyAgentRuntimeIdentityToken(capturedGatewayCall().agentRuntimeIdentityToken),
+    ).resolves.toMatchObject({
+      executionIdentity: parentExecutionIdentity,
+      sessionSpawnContext: {
+        completionOwnerSessionKey: "agent:ops:discord:direct:alice",
+        inheritedToolPolicy: { version: 1, allow: ["read"], deny: ["exec"] },
+      },
+    });
+  });
+
+  it("does not recover missing forwarded parent evidence from ambient identity", async () => {
+    mocks.callGateway.mockResolvedValueOnce({ key: "agent:ops:dashboard:child" });
+    const ambientToken = createExecutionIdentityAdmissionToken("run-1");
+
+    await withActiveGatewayToolCallerIdentity(
+      {
+        agentId: "ops",
+        sessionKey: "agent:ops:main",
+        operationalRunInstance: createOperationalRunInstanceRef("run-1"),
+        executionIdentityToken: ambientToken,
+      },
+      async () =>
+        await runWithGatewaySessionSpawnContext(
+          withAgentRuntimeExecutionLineage(
+            {
+              inheritedToolPolicy: { version: 1, allow: [], deny: [] },
+            },
+            {
+              relation: "sessions_spawn",
+              requesterRef: "agent:ops:main",
+              controllerRef: "agent:ops:main",
+              depth: 1,
+              applicableGrantRefs: ["tool:sessions_spawn"],
+              localPolicyRefs: [],
+              runtimeAssuranceRefs: ["spawn-runtime:subagent"],
+              targetPolicyRefs: [],
+              externalNativeActions: "observable",
+            },
+          ),
           () =>
             callGatewayTool(
               "sessions.create",
@@ -123,14 +182,11 @@ describe("gateway tool runtime identity", () => {
         ),
     );
 
-    await expect(
-      verifyAgentRuntimeIdentityToken(capturedGatewayCall().agentRuntimeIdentityToken),
-    ).resolves.toMatchObject({
-      sessionSpawnContext: {
-        completionOwnerSessionKey: "agent:ops:discord:direct:alice",
-        inheritedToolPolicy: { version: 1, allow: ["read"], deny: ["exec"] },
-      },
-    });
+    const identity = await verifyAgentRuntimeIdentityToken(
+      capturedGatewayCall().agentRuntimeIdentityToken,
+    );
+    expect(identity).toBeDefined();
+    expect(identity).not.toHaveProperty("executionIdentity");
   });
 
   it("mints message action identity only for an exact admitted source turn", async () => {

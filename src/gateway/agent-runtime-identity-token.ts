@@ -19,6 +19,10 @@ import { ensureExecApprovalsSnapshot, loadExecApprovalsAsync } from "../infra/ex
 import { normalizeOptionalAccountId } from "../routing/account-id.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
+import {
+  type AgentRuntimeExecutionLineage,
+  withAgentRuntimeExecutionLineage,
+} from "./agent-runtime-execution-lineage.js";
 import type { CronCreatorAuthorityGrant } from "./cron-creator-authority-grant.js";
 import type { AgentRuntimeMessageActionContext } from "./message-action-turn-capability.js";
 import type { WorkerSessionTurnClaim } from "./worker-environments/placement-record.js";
@@ -144,6 +148,21 @@ const delegatedAuthoritySchema = z.discriminatedUnion("kind", [
 const stringListSchema = z
   .array(z.string())
   .transform((entries) => entries.map((entry) => entry.trim()).filter(Boolean));
+const boundedRawRefSchema = z.string().trim().min(1).max(4_096);
+const boundedRawRefListSchema = z.array(boundedRawRefSchema).max(16);
+const executionLineageSchema = z
+  .object({
+    relation: z.literal("sessions_spawn"),
+    requesterRef: boundedRawRefSchema,
+    controllerRef: boundedRawRefSchema,
+    depth: z.number().int().min(1).max(64),
+    applicableGrantRefs: boundedRawRefListSchema,
+    localPolicyRefs: boundedRawRefListSchema,
+    runtimeAssuranceRefs: boundedRawRefListSchema,
+    targetPolicyRefs: boundedRawRefListSchema,
+    externalNativeActions: z.enum(["observable", "unsupported"]),
+  })
+  .transform((lineage): AgentRuntimeExecutionLineage => lineage);
 const sessionSpawnContextSchema = z
   .object({
     completionOwnerSessionKey: normalizedRequiredStringSchema.optional(),
@@ -152,15 +171,19 @@ const sessionSpawnContextSchema = z
       allow: stringListSchema,
       deny: stringListSchema,
     }),
+    executionLineage: executionLineageSchema.optional(),
   })
-  .transform(
-    (context): AgentRuntimeSessionSpawnContext => ({
+  .transform((context): AgentRuntimeSessionSpawnContext => {
+    const spawnContext = {
       ...(context.completionOwnerSessionKey
         ? { completionOwnerSessionKey: context.completionOwnerSessionKey }
         : {}),
       inheritedToolPolicy: context.inheritedToolPolicy,
-    }),
-  );
+    };
+    return context.executionLineage
+      ? withAgentRuntimeExecutionLineage(spawnContext, context.executionLineage)
+      : spawnContext;
+  });
 const cronCreatorAuthorityGrantSchema = z
   .object({
     runId: normalizedRequiredStringSchema,
@@ -424,6 +447,13 @@ function prepareAgentRuntimeIdentityTokenPayload(params: AgentRuntimeIdentityTok
   if (!operationalInstanceId || !operationalRunId) {
     throw new Error("agent runtime identity requires an operational run instance");
   }
+  const parsedSessionSpawnContext = params.sessionSpawnContext
+    ? sessionSpawnContextSchema.safeParse(params.sessionSpawnContext)
+    : undefined;
+  if (parsedSessionSpawnContext && !parsedSessionSpawnContext.success) {
+    throw new Error("agent runtime session spawn context violates its bounded contract");
+  }
+  const sessionSpawnContext = parsedSessionSpawnContext?.data;
   const activeAuthority = getActiveAgentRunDelegatedAuthority({
     instanceId: operationalInstanceId,
     runId: operationalRunId,
@@ -506,7 +536,7 @@ function prepareAgentRuntimeIdentityTokenPayload(params: AgentRuntimeIdentityTok
     ...(params.cronCreatorAuthorityGrant
       ? { cronCreatorAuthorityGrant: params.cronCreatorAuthorityGrant }
       : {}),
-    ...(params.sessionSpawnContext ? { sessionSpawnContext: params.sessionSpawnContext } : {}),
+    ...(sessionSpawnContext ? { sessionSpawnContext } : {}),
     ...(params.executionIdentityToken?.runId === operationalRunId
       ? { executionIdentity: params.executionIdentityToken }
       : {}),
