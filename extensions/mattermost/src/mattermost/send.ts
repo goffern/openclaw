@@ -76,9 +76,11 @@ export type MattermostSendResult = {
 
 const MATTERMOST_BOT_USER_CACHE_MAX_ENTRIES = 64;
 const MATTERMOST_TARGET_CACHE_MAX_ENTRIES = 1024;
+/** Maximum characters Mattermost accepts in a single post message (Post.Message). */
+export const MATTERMOST_POST_MAX_CHARS = 16_383;
 const MATTERMOST_FORMAT_PROFILE = FormatCapabilityProfile.define({
   mechanism: "markdown",
-  chunk: { limit: 16_383, unit: "chars" },
+  chunk: { limit: MATTERMOST_POST_MAX_CHARS, unit: "chars" },
 });
 
 function renderMattermostMarkdown(

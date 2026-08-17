@@ -24,7 +24,7 @@ import {
   resolveMattermostReplyDeliveryBarrierTimeoutMs,
   type CreateDmChannelRetryOptions,
 } from "./client.js";
-import type { MattermostSendResult } from "./send.js";
+import { MATTERMOST_POST_MAX_CHARS, type MattermostSendResult } from "./send.js";
 
 type MarkdownTableMode = Parameters<PluginRuntime["channel"]["text"]["convertMarkdownTables"]>[1];
 
@@ -166,7 +166,21 @@ export async function deliverMattermostReplyPayload(params: {
         acceptedContents.push(result.content);
       },
       sendMedia: async ({ mediaUrl, caption }) => {
-        const result = await params.sendMessage(params.to, caption ?? "", {
+        const captionText = caption ?? "";
+        // Mattermost rejects a post whose message exceeds MATTERMOST_POST_MAX_CHARS,
+        // which would drop the entire media reply. When the caption is over the
+        // cap, attach the media to a bounded first chunk and deliver the rest as
+        // follow-up text posts instead of losing everything.
+        const captionChunks =
+          captionText.length > MATTERMOST_POST_MAX_CHARS
+            ? params.core.channel.text.chunkMarkdownTextWithMode(
+                captionText,
+                Math.min(params.textLimit, MATTERMOST_POST_MAX_CHARS),
+                chunkMode,
+              )
+            : [captionText];
+        const [firstChunk = "", ...restChunks] = captionChunks;
+        const mediaResult = await params.sendMessage(params.to, firstChunk, {
           cfg: params.cfg,
           accountId: params.accountId,
           mediaUrl,
@@ -176,8 +190,20 @@ export async function deliverMattermostReplyPayload(params: {
             ? { onDmChannelResolution: params.onDmChannelResolution }
             : {}),
         });
-        results.push(result);
-        acceptedContents.push(result.content);
+        results.push(mediaResult);
+        acceptedContents.push(mediaResult.content);
+        for (const chunk of restChunks) {
+          const textResult = await params.sendMessage(params.to, chunk, {
+            cfg: params.cfg,
+            accountId: params.accountId,
+            replyToId: params.replyToId,
+            ...(params.onDmChannelResolution
+              ? { onDmChannelResolution: params.onDmChannelResolution }
+              : {}),
+          });
+          results.push(textResult);
+          acceptedContents.push(textResult.content);
+        }
       },
     });
   } catch (error: unknown) {

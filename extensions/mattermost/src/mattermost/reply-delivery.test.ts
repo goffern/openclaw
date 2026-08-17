@@ -301,6 +301,41 @@ describe("deliverMattermostReplyPayload", () => {
     }
   });
 
+  it("splits an over-cap media caption: media keeps the first chunk, the rest go as follow-up text", async () => {
+    const sendMessage = createSendMessageMock();
+    const cfg = {} satisfies OpenClawConfig;
+    const core = createReplyDeliveryCore();
+    core.channel.text.chunkMarkdownTextWithMode = vi.fn(() => ["first chunk", "second chunk"]);
+    // A caption longer than the Mattermost post cap would be rejected wholesale
+    // if sent as a single message, dropping the entire media reply.
+    const longCaption = "x".repeat(20_000);
+
+    const result = await deliverMattermostReplyPayload({
+      core,
+      cfg,
+      payload: { text: longCaption, mediaUrl: "https://example.com/chart.png" },
+      to: "channel:town-square",
+      accountId: "default",
+      replyToId: "root-post",
+      textLimit: 4000,
+      tableMode: "off",
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    // Media is attached to the bounded first chunk.
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      1,
+      "channel:town-square",
+      "first chunk",
+      expect.objectContaining({ mediaUrl: "https://example.com/chart.png", replyToId: "root-post" }),
+    );
+    // The overflow is delivered as a follow-up text post, not silently lost.
+    expect(sendMessage.mock.calls[1]?.[1]).toBe("second chunk");
+    expect((sendMessage.mock.calls[1]?.[2] as { mediaUrl?: string }).mediaUrl).toBeUndefined();
+    expect(result.outcome).toBe("media");
+  });
+
   it("forwards replyToId for text-only chunked replies", async () => {
     const sendMessage = createSendMessageMock();
     const cfg = {} satisfies OpenClawConfig;
