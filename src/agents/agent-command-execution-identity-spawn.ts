@@ -19,19 +19,21 @@ export function withAgentCommandExecutionIdentitySpawnFacts<T extends AgentComma
   opts: T,
   facts: AgentCommandExecutionIdentitySpawnFacts | undefined,
 ): T {
-  return facts ? ({ ...opts, [EXECUTION_IDENTITY_SPAWN_FACTS]: facts } as T) : opts;
+  if (!facts) {
+    return opts;
+  }
+  const carried = { ...opts, [EXECUTION_IDENTITY_SPAWN_FACTS]: facts };
+  return carried;
 }
 
 export function readAgentCommandExecutionIdentitySpawnFacts(
-  opts: AgentCommandOpts,
+  opts: AgentCommandOpts & AgentCommandExecutionIdentityCarrier,
 ): AgentCommandExecutionIdentitySpawnFacts | undefined {
-  return (opts as AgentCommandOpts & AgentCommandExecutionIdentityCarrier)[
-    EXECUTION_IDENTITY_SPAWN_FACTS
-  ];
+  return opts[EXECUTION_IDENTITY_SPAWN_FACTS];
 }
 
 export function withoutAgentCommandExecutionIdentitySpawnFacts<T extends AgentCommandOpts>(
   opts: T,
 ): T {
-  return { ...opts, [EXECUTION_IDENTITY_SPAWN_FACTS]: undefined } as T;
+  return { ...opts, [EXECUTION_IDENTITY_SPAWN_FACTS]: undefined };
 }

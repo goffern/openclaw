@@ -43,7 +43,6 @@ import {
   inheritedToolAllowPatch,
   inheritedToolDenyPatch,
 } from "../../inherited-tool-deny.js";
-import { AGENT_LANE_SUBAGENT } from "../../lanes.js";
 import { resolveSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
 import {
   runSpawnPipeline,
@@ -65,6 +64,7 @@ import {
   toGatewayImageAttachments,
   type AcpSpawnBootstrapDeliveryPlan,
 } from "./acp-spawn-bootstrap-delivery.js";
+import { launchAcpChildThroughGateway } from "./acp-spawn-gateway.js";
 import {
   type AcpSpawnParentRelayHandle,
   startAcpSpawnParentStreamRelay,
@@ -92,11 +92,7 @@ import {
   isSubagentEnvelopeSession,
   resolveSubagentCapabilityStore,
 } from "./subagent-capabilities.js";
-import {
-  buildSubagentExecutionSessionSpawnContext,
-  withSubagentGatewayExecutionIdentity,
-} from "./subagent-spawn-execution-identity.js";
-import { callSubagentGateway, readGatewayRunId } from "./subagent-spawn-gateway.js";
+import { readGatewayRunId } from "./subagent-spawn-gateway.js";
 import { resolveSubagentSpawnOwnership } from "./subagent-spawn-ownership.js";
 import { resolveConfiguredSubagentRunTimeoutSeconds } from "./subagent-spawn-plan.js";
 
@@ -592,45 +588,29 @@ export async function spawnAcpDirect(
           cfg,
         });
       }
-      const response = await callSubagentGateway(
-        withSubagentGatewayExecutionIdentity(
-          {
-            method: "agent",
-            params: {
-              message: params.task,
-              sessionKey,
-              channel: state.deliveryPlan.channel,
-              to: state.deliveryPlan.to,
-              accountId: state.deliveryPlan.accountId,
-              threadId: state.deliveryPlan.threadId,
-              idempotencyKey: childIdem,
-              deliver: state.deliveryPlan.useInlineDelivery,
-              lane: AGENT_LANE_SUBAGENT,
-              acpTurnSource: "manual_spawn",
-              timeout: runTimeoutSeconds,
-              label: params.label || undefined,
-              ...(gatewayAttachments ? { attachments: gatewayAttachments } : {}),
-            },
-            timeoutMs: 10_000,
-          },
-          {
-            sessionSpawnContext: buildSubagentExecutionSessionSpawnContext({
-              enabled: isExecutionIdentityCollectionEnabled(cfg),
-              backend: "acp",
-              parentAgentId: requesterAgentId,
-              requesterRef: requesterInternalKey,
-              controllerRef: ownership.controllerSessionKey,
-              depth: admission.childSessionPatch?.spawnDepth ?? 1,
-              maxDepth: admission.maxSpawnDepth,
-              targetAgentId,
-              sandbox: params.sandbox === "require" ? "require" : "inherit",
-              inheritedToolAllowlist: ctx.inheritedToolAllowlist,
-              inheritedToolDenylist: ctx.inheritedToolDenylist,
-            }),
-            parentExecutionIdentityToken: readParentExecutionIdentity(ctx),
-          },
-        ),
-      );
+      const response = await launchAcpChildThroughGateway({
+        task: params.task,
+        sessionKey,
+        deliveryPlan: state.deliveryPlan,
+        childIdem,
+        runTimeoutSeconds,
+        label: params.label,
+        attachments: gatewayAttachments,
+        lineage: {
+          enabled: isExecutionIdentityCollectionEnabled(cfg),
+          backend: "acp",
+          parentAgentId: requesterAgentId,
+          requesterRef: requesterInternalKey,
+          controllerRef: ownership.controllerSessionKey,
+          depth: admission.childSessionPatch?.spawnDepth ?? 1,
+          maxDepth: admission.maxSpawnDepth,
+          targetAgentId,
+          sandbox: params.sandbox === "require" ? "require" : "inherit",
+          inheritedToolAllowlist: ctx.inheritedToolAllowlist,
+          inheritedToolDenylist: ctx.inheritedToolDenylist,
+        },
+        parentExecutionIdentityToken: readParentExecutionIdentity(ctx),
+      });
       const runId = readGatewayRunId(response) ?? childIdem;
       if (state.parentRelay && runId !== childIdem && parentSessionKey) {
         state.parentRelay.dispose();

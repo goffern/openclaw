@@ -8,11 +8,7 @@ type SubagentGatewayExecutionIdentity = {
   parentExecutionIdentityToken?: ExecutionIdentityAdmissionToken;
 };
 
-const SUBAGENT_GATEWAY_EXECUTION_IDENTITY = Symbol("subagentGatewayExecutionIdentity");
-
-type SubagentGatewayExecutionIdentityCarrier = {
-  [SUBAGENT_GATEWAY_EXECUTION_IDENTITY]?: SubagentGatewayExecutionIdentity;
-};
+const subagentGatewayExecutionIdentities = new WeakMap<object, SubagentGatewayExecutionIdentity>();
 
 function spawnInputRef(kind: string, value: unknown): string {
   return `${kind}:${createHash("sha256").update(JSON.stringify(value)).digest("base64url")}`;
@@ -67,11 +63,13 @@ export function withSubagentGatewayExecutionIdentity<T extends object>(
   params: T,
   facts: SubagentGatewayExecutionIdentity,
 ): T {
-  return { ...params, [SUBAGENT_GATEWAY_EXECUTION_IDENTITY]: facts } as T;
+  const carried = { ...params };
+  subagentGatewayExecutionIdentities.set(carried, facts);
+  return carried;
 }
 
 export function readSubagentGatewayExecutionIdentity(
   params: object,
 ): SubagentGatewayExecutionIdentity | undefined {
-  return (params as SubagentGatewayExecutionIdentityCarrier)[SUBAGENT_GATEWAY_EXECUTION_IDENTITY];
+  return subagentGatewayExecutionIdentities.get(params);
 }

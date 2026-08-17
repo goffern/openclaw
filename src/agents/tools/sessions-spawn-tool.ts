@@ -49,8 +49,8 @@ import {
   readToolStringParam,
   ToolInputError,
 } from "./common.js";
-import { runWithScopedSessionAccess } from "./scoped-session-access.js";
 import { getGatewayToolCallerIdentity } from "./gateway-caller-context.js";
+import { runWithScopedSessionAccess } from "./scoped-session-access.js";
 import {
   resolveEffectiveSessionToolsVisibility,
   resolveSandboxedSessionToolContext,

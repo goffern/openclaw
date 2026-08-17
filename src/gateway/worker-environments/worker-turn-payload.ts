@@ -110,6 +110,8 @@ export async function prepareWorkerAgentRuntimeIdentity(
       params.placements,
       params.turnClaim,
       runtimeIdentity.executionIdentityToken,
+      admittedRunContext.operationalRunInstance,
+      { agentId: params.agentId, sessionKey: params.sessionKey },
     );
   }
   return {

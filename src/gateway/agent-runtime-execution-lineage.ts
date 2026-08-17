@@ -12,7 +12,7 @@ export type AgentRuntimeExecutionLineage = {
   externalNativeActions: "observable" | "unsupported";
 };
 
-type AgentRuntimeExecutionLineageCarrier = {
+export type AgentRuntimeExecutionLineageCarrier = {
   executionLineage?: AgentRuntimeExecutionLineage;
 };
 
@@ -20,14 +20,12 @@ type AgentRuntimeExecutionLineageCarrier = {
 export function withAgentRuntimeExecutionLineage<T extends AgentRuntimeSessionSpawnContext>(
   context: T,
   lineage: AgentRuntimeExecutionLineage,
-): T {
-  return { ...context, executionLineage: lineage } as T;
+): T & AgentRuntimeExecutionLineageCarrier {
+  return { ...context, executionLineage: lineage };
 }
 
 export function readAgentRuntimeExecutionLineage(
-  context: AgentRuntimeSessionSpawnContext | undefined,
+  context: (AgentRuntimeSessionSpawnContext & AgentRuntimeExecutionLineageCarrier) | undefined,
 ): AgentRuntimeExecutionLineage | undefined {
-  return (
-    context as (AgentRuntimeSessionSpawnContext & AgentRuntimeExecutionLineageCarrier) | undefined
-  )?.executionLineage;
+  return context?.executionLineage;
 }

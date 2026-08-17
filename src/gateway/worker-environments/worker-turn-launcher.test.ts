@@ -431,4 +431,3 @@ describe("worker turn launcher local placement", () => {
     expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
   });
 });
-

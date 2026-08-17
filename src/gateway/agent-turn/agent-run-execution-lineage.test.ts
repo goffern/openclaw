@@ -49,7 +49,7 @@ describe("child execution identity lineage", () => {
 
     expect(facts).toMatchObject({
       ingress: { kind: "subagent", boundary: "sessions_spawn.subagent" },
-      invoker: { kind: "agent", rawPrincipalRef: "parent-agent" },
+      invoker: { state: "present", kind: "agent", rawPrincipalRef: "parent-agent" },
       applicableGrants: [{ rawGrantRef: "tool:sessions_spawn", state: "present" }],
     });
     expect(

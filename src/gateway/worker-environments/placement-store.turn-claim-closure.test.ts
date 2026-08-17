@@ -2,7 +2,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import { createExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
+import {
+  claimAgentRunDelegatedAuthority,
+  releaseAgentRunDelegatedAuthority,
+} from "../../infra/agent-run-registry.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
@@ -15,7 +20,7 @@ import {
 } from "./placement-store.js";
 import {
   bindWorkerTurnExecutionIdentity,
-  readWorkerTurnExecutionIdentity,
+  getWorkerTurnExecutionIdentityCapability,
 } from "./placement-turn-claim-events.js";
 
 const SESSION: WorkerSessionPlacementIdentity = {
@@ -93,25 +98,7 @@ it("emits exact worker claim closure after release and owner fencing", () => {
     claimId: "claim-release",
     runId: "run-release",
   });
-  const firstIdentity = createExecutionIdentityAdmissionToken(first.runId);
-  bindWorkerTurnExecutionIdentity(store, first, firstIdentity);
-  expect(
-    readWorkerTurnExecutionIdentity(store, {
-      sessionId: first.sessionId,
-      environmentId: owner.environmentId,
-      ownerEpoch: owner.ownerEpoch,
-      runId: first.runId,
-    }),
-  ).toBe(firstIdentity);
   store.releaseTurn(first);
-  expect(
-    readWorkerTurnExecutionIdentity(store, {
-      sessionId: first.sessionId,
-      environmentId: owner.environmentId,
-      ownerEpoch: owner.ownerEpoch,
-      runId: first.runId,
-    }),
-  ).toBeUndefined();
   expect(closed).toHaveBeenLastCalledWith(first);
 
   const second = store.claimTurn({
@@ -120,11 +107,6 @@ it("emits exact worker claim closure after release and owner fencing", () => {
     claimId: "claim-fence",
     runId: "run-fence",
   });
-  bindWorkerTurnExecutionIdentity(
-    store,
-    second,
-    createExecutionIdentityAdmissionToken(second.runId),
-  );
   const draining = store.startDrain({
     sessionId: active.sessionId,
     environmentId: active.environmentId,
@@ -137,15 +119,81 @@ it("emits exact worker claim closure after release and owner fencing", () => {
     ownerEpoch: active.activeOwnerEpoch,
     expectedGeneration: draining.generation,
   });
-  expect(
-    readWorkerTurnExecutionIdentity(store, {
-      sessionId: second.sessionId,
-      environmentId: owner.environmentId,
-      ownerEpoch: owner.ownerEpoch,
-      runId: second.runId,
-    }),
-  ).toBeUndefined();
   expect(closed).toHaveBeenLastCalledWith(second);
   expect(closed).toHaveBeenCalledTimes(2);
   unregister();
+});
+
+it("rejects retained worker lineage capabilities after either owner closes", async () => {
+  const active = advanceToActive();
+  const owner = {
+    kind: "worker" as const,
+    environmentId: active.environmentId,
+    ownerEpoch: active.activeOwnerEpoch,
+  };
+  const bindingFor = (runId: string) => ({
+    sessionId: SESSION.sessionId,
+    environmentId: owner.environmentId,
+    ownerEpoch: owner.ownerEpoch,
+    runId,
+  });
+
+  const placementClosedClaim = store.claimTurn({
+    ...SESSION,
+    owner,
+    claimId: "claim-placement-close",
+    runId: "run-placement-close",
+  });
+  const placementClosedRun = createOperationalRunInstanceRef(placementClosedClaim.runId);
+  const placementClosedAuthority = claimAgentRunDelegatedAuthority(placementClosedRun);
+  bindWorkerTurnExecutionIdentity(
+    store,
+    placementClosedClaim,
+    createExecutionIdentityAdmissionToken(placementClosedClaim.runId),
+    placementClosedRun,
+    { agentId: SESSION.agentId, sessionKey: SESSION.sessionKey },
+  );
+  const placementCapability = getWorkerTurnExecutionIdentityCapability(
+    store,
+    bindingFor(placementClosedClaim.runId),
+  );
+  if (!placementCapability) {
+    throw new Error("expected placement-bound lineage capability");
+  }
+  store.releaseTurn(placementClosedClaim);
+  await expect(placementCapability.run(async () => "stale")).rejects.toThrow(
+    "worker turn authority changed",
+  );
+  releaseAgentRunDelegatedAuthority(placementClosedAuthority);
+
+  const runClosedClaim = store.claimTurn({
+    ...SESSION,
+    owner,
+    claimId: "claim-run-close",
+    runId: "run-run-close",
+  });
+  const runClosedOperational = createOperationalRunInstanceRef(runClosedClaim.runId);
+  const runClosedAuthority = claimAgentRunDelegatedAuthority(runClosedOperational);
+  bindWorkerTurnExecutionIdentity(
+    store,
+    runClosedClaim,
+    createExecutionIdentityAdmissionToken(runClosedClaim.runId),
+    runClosedOperational,
+    { agentId: SESSION.agentId, sessionKey: SESSION.sessionKey },
+  );
+  const runCapability = getWorkerTurnExecutionIdentityCapability(
+    store,
+    bindingFor(runClosedClaim.runId),
+  );
+  if (!runCapability) {
+    throw new Error("expected run-bound lineage capability");
+  }
+  await expect(
+    runCapability.run(async () => {
+      await Promise.resolve();
+      releaseAgentRunDelegatedAuthority(runClosedAuthority);
+      return "closed-after-await";
+    }),
+  ).rejects.toThrow("worker turn authority changed");
+  store.releaseTurn(runClosedClaim);
 });

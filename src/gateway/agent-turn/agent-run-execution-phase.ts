@@ -209,9 +209,12 @@ export function startAgentRunExecution(params: {
         runId: params.runId,
         sessionEntry: params.sessionEntry,
       });
-      const executionIdentitySpawnFacts = resolveExecutionIdentitySpawnFacts(
-        params.client?.internal?.agentRuntimeIdentity,
-      );
+      const agentRuntimeIdentity = params.client?.internal?.agentRuntimeIdentity;
+      const executionIdentitySpawnFacts =
+        agentRuntimeIdentity &&
+        params.context.validateAgentRuntimeApprovalAuthority?.(agentRuntimeIdentity) === true
+          ? resolveExecutionIdentitySpawnFacts(agentRuntimeIdentity)
+          : undefined;
       const restartRecoveryChannelContext = resolveAgentRestartRecoveryChannelContext({
         canUseInternalRuntimeHandoff: params.canUseInternalRuntimeHandoff,
         expectedExistingSessionId: params.request.expectedExistingSessionId,

@@ -1,4 +1,10 @@
+import type { OperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import type { ExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
+import {
+  getActiveAgentRunDelegatedAuthority,
+  validateAgentRunDelegatedAuthority,
+  type AgentRunDelegatedAuthority,
+} from "../../infra/agent-run-registry.js";
 import { resolveGlobalMap } from "../../shared/global-singleton.js";
 import type { WorkerSessionTurnClaim } from "./placement-record.js";
 
@@ -26,12 +32,28 @@ const workerTurnClaimClosedHandlers = resolveGlobalMap<
   handlersByPath.clear();
 });
 
+export type WorkerTurnExecutionIdentity = Readonly<{
+  agentId: string;
+  delegatedAuthority: AgentRunDelegatedAuthority;
+  executionIdentityToken: ExecutionIdentityAdmissionToken;
+  operationalRunInstance: OperationalRunInstanceRef;
+  sessionKey: string;
+  turnClaim: WorkerSessionTurnClaim;
+}>;
+
+export type WorkerTurnExecutionIdentityCapability = Readonly<{
+  run<T>(callback: (identity: WorkerTurnExecutionIdentity) => Promise<T> | T): Promise<T>;
+}>;
+
+type BoundWorkerTurnExecutionIdentity = {
+  capability: WorkerTurnExecutionIdentityCapability;
+  claim: WorkerSessionTurnClaim;
+  claimKey: string;
+};
+
 const workerTurnExecutionIdentities = resolveGlobalMap<
   string,
-  Map<
-    string,
-    { claim: WorkerSessionTurnClaim; claimKey: string; token: ExecutionIdentityAdmissionToken }
-  >
+  Map<string, BoundWorkerTurnExecutionIdentity>
 >(Symbol.for("openclaw.workerTurnExecutionIdentities"), (identities) => identities.clear());
 
 const WORKER_TURN_EXECUTION_IDENTITY_PATH = Symbol("workerTurnExecutionIdentityPath");
@@ -51,25 +73,53 @@ function claimKey(claim: WorkerSessionTurnClaim): string {
   ]);
 }
 
-/** Bind diagnostic provenance to the exact live worker claim; it grants no authority. */
+/** Bind diagnostic provenance to the exact live run and worker owners. */
 export function bindWorkerTurnExecutionIdentity(
   store: WorkerTurnExecutionIdentityStore,
   claim: WorkerSessionTurnClaim,
   token: ExecutionIdentityAdmissionToken,
+  operationalRunInstance: OperationalRunInstanceRef,
+  source: { agentId: string; sessionKey: string },
 ): void {
   const path = store[WORKER_TURN_EXECUTION_IDENTITY_PATH];
-  if (!path || !store.validateTurnClaim(claim)) {
+  const delegatedAuthority = getActiveAgentRunDelegatedAuthority(operationalRunInstance);
+  if (!path || !store.validateTurnClaim(claim) || !delegatedAuthority) {
     throw new Error(`Session ${claim.sessionId} worker turn authority changed`);
   }
+  const identity = Object.freeze({
+    agentId: source.agentId,
+    delegatedAuthority,
+    executionIdentityToken: token,
+    operationalRunInstance,
+    sessionKey: source.sessionKey,
+    turnClaim: claim,
+  });
+  const assertActive = () => {
+    if (
+      !store.validateTurnClaim(claim) ||
+      !validateAgentRunDelegatedAuthority(delegatedAuthority)
+    ) {
+      throw new Error(`Session ${claim.sessionId} worker turn authority changed`);
+    }
+  };
+  const capability = Object.freeze({
+    async run<T>(callback: (current: WorkerTurnExecutionIdentity) => Promise<T> | T): Promise<T> {
+      assertActive();
+      const result = await callback(identity);
+      // Awaited policy, RPC, approval, and recovery work may close either owner.
+      assertActive();
+      return result;
+    },
+  });
   const identities = workerTurnExecutionIdentities.get(path) ?? new Map();
-  identities.set(claim.sessionId, { claim, claimKey: claimKey(claim), token });
+  identities.set(claim.sessionId, { capability, claim, claimKey: claimKey(claim) });
   workerTurnExecutionIdentities.set(path, identities);
 }
 
-export function readWorkerTurnExecutionIdentity(
+export function getWorkerTurnExecutionIdentityCapability(
   store: WorkerTurnExecutionIdentityStore,
   binding: { sessionId: string; environmentId: string; ownerEpoch: number; runId: string },
-): ExecutionIdentityAdmissionToken | undefined {
+): WorkerTurnExecutionIdentityCapability | undefined {
   const path = store[WORKER_TURN_EXECUTION_IDENTITY_PATH];
   const bound = path ? workerTurnExecutionIdentities.get(path)?.get(binding.sessionId) : undefined;
   const owner = bound?.claim.owner;
@@ -79,7 +129,7 @@ export function readWorkerTurnExecutionIdentity(
     owner.environmentId === binding.environmentId &&
     owner.ownerEpoch === binding.ownerEpoch &&
     store.validateTurnClaim(bound.claim)
-    ? bound.token
+    ? bound.capability
     : undefined;
 }
 

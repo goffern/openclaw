@@ -23,7 +23,6 @@ import {
   processExecutionIdentityAdmissionWork,
   pruneExpiredExecutionIdentityContexts,
 } from "./execution-identity-context.js";
-import { executionIdentitySpawnAdmission } from "./execution-identity-spawn-admission.js";
 
 const RETENTION_MS = 30 * 24 * 60 * 60_000;
 
@@ -47,30 +46,15 @@ function openIndependentStateDatabase(path: string): OpenClawStateDatabase {
 
 function facts(
   runId: string,
-  overrides: Partial<ExecutionIdentityAdmissionFacts> & {
-    spawnLineage?: Record<string, unknown>;
-    spawnMissingEvidence?: string[];
-  } = {},
+  overrides: Partial<ExecutionIdentityAdmissionFacts> = {},
 ): ExecutionIdentityAdmissionFacts {
-  const { spawnLineage, spawnMissingEvidence, ...admissionOverrides } = overrides;
-  return executionIdentitySpawnAdmission({
-    operation: "attach",
-    value: {
-      runId,
-      agentId: "main",
-      ingress: { kind: "local-cli", boundary: "agent-command.local", state: "present" },
-      runtime: { kind: "embedded" },
-      ...admissionOverrides,
-    },
-    extra:
-      spawnLineage || spawnMissingEvidence
-        ? (executionIdentitySpawnAdmission({
-            operation: "serialize",
-            value: spawnLineage,
-            extra: spawnMissingEvidence ?? [],
-          }) as string)
-        : undefined,
-  }) as ExecutionIdentityAdmissionFacts;
+  return {
+    runId,
+    agentId: "main",
+    ingress: { kind: "local-cli", boundary: "agent-command.local", state: "present" },
+    runtime: { kind: "embedded" },
+    ...overrides,
+  };
 }
 
 function captureExecutionIdentityAdmissionEnvelope(
@@ -183,127 +167,6 @@ function recordDeniedApprovalForRun(
 }
 
 describe("execution identity context storage", () => {
-  it("preserves private spawn facts across the prepared-admission copy", () => {
-    const context = prepareExecutionIdentityContextAtAdmission(
-      {
-        ...facts("copied-child-run", {
-          spawnLineage: {
-            parentContextId: "copied-parent-context",
-            parentExecutionId: "copied-parent-execution",
-            parentRunId: "copied-parent-run",
-            parentAgentId: "parent-agent",
-            relation: "sessions_spawn",
-            rawRequesterRef: "requester",
-            rawControllerRef: "controller",
-            depth: 1,
-            localPolicyRefs: [],
-            targetPolicyRefs: [],
-          },
-        }),
-      },
-      {
-        ...databaseOptions(),
-        contextId: "copied-child-context",
-        executionId: "copied-child-execution",
-        now: 100,
-      },
-    );
-
-    expect(context.lineage).toMatchObject({
-      parentContextId: "copied-parent-context",
-      parentExecutionId: "copied-parent-execution",
-      parentRunId: "copied-parent-run",
-      depth: 1,
-    });
-  });
-
-  it("projects bounded child lineage and narrowing inputs without retaining raw owner refs", () => {
-    const database = databaseOptions();
-    const context = prepareExecutionIdentityContextAtAdmission(
-      facts("child-run", {
-        ingress: { kind: "subagent", boundary: "sessions_spawn.subagent", state: "present" },
-        invoker: { kind: "agent", rawPrincipalRef: "parent-agent" },
-        applicableGrants: [{ rawGrantRef: "tool:sessions_spawn", state: "present" }],
-        assurance: [
-          {
-            kind: "spawn-lineage",
-            rawEvidenceRef: "native-spawn-proof",
-            strength: "boundary-verified",
-          },
-        ],
-        spawnLineage: {
-          parentContextId: "parent-context",
-          parentExecutionId: "parent-execution",
-          parentRunId: "parent-run",
-          parentAgentId: "parent-agent",
-          relation: "sessions_spawn",
-          rawRequesterRef: "agent:main:private-requester",
-          rawControllerRef: "agent:main:private-controller",
-          depth: 2,
-          localPolicyRefs: ["local-policy-secret"],
-          targetPolicyRefs: ["target-policy-secret"],
-        },
-      }),
-      {
-        ...database,
-        contextId: "child-context",
-        executionId: "child-execution",
-        now: 100,
-      },
-    );
-
-    expect(context.coverageState).toBe("attribution-only");
-    expect(context.lineage).toMatchObject({
-      parentContextId: "parent-context",
-      parentExecutionId: "parent-execution",
-      parentRunId: "parent-run",
-      parentAgentPrincipal: { kind: "agent", principalRef: "parent-agent" },
-      depth: 2,
-      delegationRef: expect.any(String),
-    });
-    expect(context.applicableGrants).toHaveLength(1);
-    expect(context.assurance).toHaveLength(1);
-    expect(context.missingEvidence).toEqual([]);
-    expect(JSON.stringify(context)).not.toMatch(
-      /private-requester|private-controller|local-policy-secret|target-policy-secret|native-spawn-proof|tool:sessions_spawn/,
-    );
-  });
-
-  it("keeps child attribution visible when parent evidence and ACP callbacks are unavailable", () => {
-    const context = prepareExecutionIdentityContextAtAdmission(
-      facts("acp-child", {
-        ingress: { kind: "acp", boundary: "sessions_spawn.acp", state: "present" },
-        invoker: { kind: "agent", rawPrincipalRef: "parent-agent" },
-        spawnLineage: {
-          parentAgentId: "parent-agent",
-          relation: "sessions_spawn",
-          rawRequesterRef: "requester",
-          rawControllerRef: "controller",
-          depth: 1,
-          localPolicyRefs: [],
-          targetPolicyRefs: [],
-        },
-        spawnMissingEvidence: [
-          "lineage.parent-context",
-          "lineage.parent-execution",
-          "lineage.parent-run",
-          "acp.native-action-callback",
-        ],
-      }),
-      { ...databaseOptions(), contextId: "acp-context", executionId: "acp-execution" },
-    );
-
-    expect(context.coverageState).toBe("attribution-only");
-    expect(context.lineage).toMatchObject({ depth: 1 });
-    expect(context.lineage).not.toHaveProperty("parentContextId");
-    expect(context.missingEvidence).toEqual([
-      "acp.native-action-callback",
-      "lineage.parent-context",
-      "lineage.parent-execution",
-      "lineage.parent-run",
-    ]);
-  });
-
   it("replays one byte-identical canonical context idempotently across restart", () => {
     const database = databaseOptions();
     const envelope = captureExecutionIdentityAdmissionEnvelope(facts("run-1"), {

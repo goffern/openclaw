@@ -1,9 +1,5 @@
 const EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS = Symbol("executionIdentitySpawnAdmissionFacts");
 
-type ExecutionIdentitySpawnAdmissionCarrier = {
-  [EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS]?: string;
-};
-
 type ExecutionIdentitySpawnLineage = {
   parentContextId?: string;
   parentExecutionId?: string;
@@ -26,12 +22,19 @@ type ExecutionIdentitySpawnAdmissionInput =
   | { operation: "serialize"; value: unknown; extra: unknown }
   | { operation: "parse"; value: unknown }
   | { operation: "attach"; value: unknown; extra?: unknown }
+  | { operation: "base-facts"; value: unknown }
   | { operation: "extend-envelope"; value: unknown; extra?: unknown }
   | { operation: "base-envelope"; value: unknown }
   | { operation: "read"; value: unknown };
 
 function isCarrierRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasSpawnAdmissionFacts(
+  value: object,
+): value is { [EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS]: unknown } {
+  return EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS in value;
 }
 
 function validRef(value: unknown, maxLength: number): value is string {
@@ -99,11 +102,40 @@ function uniqueSorted(values: readonly string[]): string[] {
   return [...new Set(values)].toSorted();
 }
 
-// The broad return keeps this private module out of the public Plugin SDK declaration closure.
-// Every operation is checked below against the discriminated input and bounded runtime contract.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function executionIdentitySpawnAdmission(input: object): any {
-  const operationInput = input as ExecutionIdentitySpawnAdmissionInput;
+export function executionIdentitySpawnAdmission(input: {
+  operation: "serialize";
+  value: unknown;
+  extra: unknown;
+}): string;
+export function executionIdentitySpawnAdmission(input: {
+  operation: "parse";
+  value: unknown;
+}): readonly [ExecutionIdentitySpawnLineage | undefined, string[]];
+export function executionIdentitySpawnAdmission<T extends object>(input: {
+  operation: "attach";
+  value: T;
+  extra?: unknown;
+}): T;
+export function executionIdentitySpawnAdmission(input: {
+  operation: "base-facts";
+  value: unknown;
+}): Record<string, unknown>;
+export function executionIdentitySpawnAdmission<T extends object>(input: {
+  operation: "extend-envelope";
+  value: T;
+  extra?: unknown;
+}): T & ExecutionIdentitySpawnAdmissionExtension;
+export function executionIdentitySpawnAdmission(input: {
+  operation: "base-envelope";
+  value: unknown;
+}): Record<string, unknown>;
+export function executionIdentitySpawnAdmission(input: {
+  operation: "read";
+  value: unknown;
+}): string | undefined;
+export function executionIdentitySpawnAdmission(
+  operationInput: ExecutionIdentitySpawnAdmissionInput,
+): unknown {
   const { operation, value } = operationInput;
   if (operation === "serialize") {
     const extension = validateEnvelopeExtension(value, operationInput.extra);
@@ -128,13 +160,16 @@ export function executionIdentitySpawnAdmission(input: object): any {
       ? { ...value, [EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS]: operationInput.extra }
       : value;
   }
+  if (operation === "base-facts") {
+    return Object.fromEntries(Object.entries(value));
+  }
   if (operation === "extend-envelope") {
     const serialized =
       typeof operationInput.extra === "string" ? operationInput.extra : JSON.stringify([null, []]);
     const [lineage, missingEvidence] = executionIdentitySpawnAdmission({
       operation: "parse",
       value: serialized,
-    }) as readonly [ExecutionIdentitySpawnLineage | undefined, string[]];
+    });
     const normalizedLineage = lineage
       ? {
           ...lineage,
@@ -153,10 +188,10 @@ export function executionIdentitySpawnAdmission(input: object): any {
     validateEnvelopeExtension(lineage, missingEvidence);
     return baseEnvelope;
   }
-  const attached = (value as ExecutionIdentitySpawnAdmissionCarrier)[
-    EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS
-  ];
-  if (attached) {
+  const attached = hasSpawnAdmissionFacts(value)
+    ? value[EXECUTION_IDENTITY_SPAWN_ADMISSION_FACTS]
+    : undefined;
+  if (typeof attached === "string") {
     return attached;
   }
   if (!Array.isArray(value.missingEvidence)) {

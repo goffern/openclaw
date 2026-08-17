@@ -26,7 +26,6 @@ import {
 import { normalizeSessionDeliveryState } from "../../../utils/delivery-context.shared.js";
 import { createOperationalRunInstanceRef } from "../../admitted-run-context.js";
 import { reserveChildAdmissionSlot } from "../../child-admission.js";
-import { resolveThinkingDefault } from "../../model-selection.js";
 import { withGatewayToolCallerIdentity } from "../../tools/gateway-caller-context.js";
 import { withParentExecutionIdentity } from "./execution-identity-spawn-context.js";
 import { setSubagentSpawnDepsForTest } from "./subagent-spawn-deps.js";

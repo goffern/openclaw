@@ -25,7 +25,7 @@ export function resolveExecutionIdentitySpawnFacts(
       boundary: `sessions_spawn.${lineage.externalNativeActions === "unsupported" ? "acp" : "subagent"}`,
       state: "present",
     },
-    invoker: { kind: "agent", rawPrincipalRef: identity.agentId },
+    invoker: { state: "present", kind: "agent", rawPrincipalRef: identity.agentId },
     applicableGrants: lineage.applicableGrantRefs.map((rawGrantRef) => ({
       rawGrantRef,
       state: "present",
@@ -62,6 +62,6 @@ export function resolveExecutionIdentitySpawnFacts(
         ...(!parent?.runId ? ["lineage.parent-run"] : []),
         ...(lineage.externalNativeActions === "unsupported" ? ["acp.native-action-callback"] : []),
       ],
-    }) as string,
+    }),
   };
 }

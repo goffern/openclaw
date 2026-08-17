@@ -27,7 +27,7 @@ import { WORKER_TOOL_NAMES } from "../../worker/tool-authority.js";
 import { loadGatewaySessionEntryReadOnly } from "../session-utils.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import type { WorkerSessionPlacementStore } from "./placement-store.js";
-import { readWorkerTurnExecutionIdentity } from "./placement-turn-claim-events.js";
+import { getWorkerTurnExecutionIdentityCapability } from "./placement-turn-claim-events.js";
 import type { WorkerPlacementDispatchContract } from "./service-contract.js";
 import type { WorkerEnvironmentService } from "./service.js";
 import {
@@ -368,18 +368,26 @@ export function createWorkerSessionToolExecutor(params: {
         visible: true,
         worktree: true,
       });
-    const parentExecutionIdentityToken = readWorkerTurnExecutionIdentity(
-      params.placements,
-      operation.source.binding,
-    );
-    return parentExecutionIdentityToken
-      ? await withGatewayToolCallerIdentity(
-          {
-            agentId: operation.source.agentId,
-            sessionKey: operation.source.sessionKey,
-            executionIdentityToken: parentExecutionIdentityToken,
-          },
-          executeSpawn,
+    const lineageCapability = getWorkerTurnExecutionIdentityCapability(params.placements, {
+      sessionId: operation.source.sessionId,
+      environmentId: operation.source.turnClaim.owner.environmentId,
+      ownerEpoch: operation.source.turnClaim.owner.ownerEpoch,
+      runId: operation.source.turnClaim.runId,
+    });
+    return lineageCapability
+      ? await lineageCapability.run(
+          async (identity) =>
+            await withGatewayToolCallerIdentity(
+              {
+                agentId: identity.agentId,
+                sessionKey: identity.sessionKey,
+                operationalRunInstance: identity.operationalRunInstance,
+                executionIdentityToken: identity.executionIdentityToken,
+                workerTurnClaim: identity.turnClaim,
+                workerTurnExecutionIdentityCapability: lineageCapability,
+              },
+              executeSpawn,
+            ),
         )
       : await executeSpawn();
   };

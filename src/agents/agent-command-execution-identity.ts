@@ -60,6 +60,8 @@ function prepareAgentCommandRunAdmissionWithSpawnFacts(
   const admissionFacts = getAgentCommandAdmissionFacts(params.operationalRunInstance) ?? {
     ingress: params.ingress,
   };
+  const applicableGrants = spawnFacts?.applicableGrants;
+  const assurance = spawnFacts?.assurance ?? admissionFacts.assurance;
   return prepareAgentRunAdmission({
     cfg: params.cfg,
     operationalRunInstance: params.operationalRunInstance,
@@ -72,11 +74,11 @@ function prepareAgentCommandRunAdmissionWithSpawnFacts(
         ...((spawnFacts?.invoker ?? admissionFacts.invoker)
           ? { invoker: spawnFacts?.invoker ?? admissionFacts.invoker }
           : {}),
-        applicableGrants: spawnFacts?.applicableGrants,
-        assurance: spawnFacts?.assurance ?? admissionFacts.assurance,
+        ...(applicableGrants ? { applicableGrants } : {}),
+        ...(assurance ? { assurance } : {}),
       },
       extra: spawnFacts?.spawnAdmission,
-    }) as ExecutionIdentityAdmissionFacts,
+    }),
     ...(params.admission ? { recovery: params.admission } : {}),
     ...(params.onAdmitted ? { onAdmitted: params.onAdmitted } : {}),
   });

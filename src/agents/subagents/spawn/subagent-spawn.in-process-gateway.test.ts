@@ -23,6 +23,11 @@ import {
   clearFallbackGatewayContext,
   type dispatchGatewayMethodInProcess,
 } from "../../../gateway/server-plugins.js";
+import type { WorkerSessionTurnClaim } from "../../../gateway/worker-environments/placement-record.js";
+import type {
+  WorkerTurnExecutionIdentity,
+  WorkerTurnExecutionIdentityCapability,
+} from "../../../gateway/worker-environments/placement-turn-claim-events.js";
 import {
   claimAgentRunDelegatedAuthority,
   releaseAgentRunDelegatedAuthority,
@@ -362,6 +367,89 @@ describe("spawnSubagentDirect in-process Gateway collector launch", () => {
         depth: 1,
         applicableGrantRefs: ["tool:sessions_spawn"],
         externalNativeActions: "observable",
+      });
+    } finally {
+      releaseAgentRunDelegatedAuthority(authority);
+    }
+  });
+
+  it("revalidates the worker capability at the child Gateway admission boundary", async () => {
+    const parentToken = createExecutionIdentityAdmissionToken("parent-run", {
+      contextId: "parent-context",
+      executionId: "parent-execution",
+    });
+    const operationalRunInstance = createOperationalRunInstanceRef("parent-run");
+    const authority = claimAgentRunDelegatedAuthority(operationalRunInstance);
+    const turnClaim = {
+      sessionId: "parent-session-id",
+      runId: "parent-run",
+      claimId: "parent-claim",
+      claimedAt: 1,
+      placementGeneration: 4,
+      owner: { kind: "worker", environmentId: "worker-env", ownerEpoch: 7 },
+    } satisfies WorkerSessionTurnClaim;
+    const identity: WorkerTurnExecutionIdentity = {
+      agentId: "main",
+      delegatedAuthority: authority,
+      executionIdentityToken: parentToken,
+      operationalRunInstance,
+      sessionKey: "agent:main:main",
+      turnClaim,
+    };
+    let validations = 0;
+    const capability: WorkerTurnExecutionIdentityCapability = {
+      async run<T>(callback: (current: WorkerTurnExecutionIdentity) => Promise<T> | T) {
+        validations += 1;
+        return await callback(identity);
+      },
+    };
+    let childIdentity: AgentRuntimeIdentity | undefined;
+    subagentSpawnTesting.setDepsForTest({
+      dispatchGatewayMethodInProcess: async <T>(
+        _method: string,
+        params: Record<string, unknown>,
+        options?: NonNullable<Parameters<typeof dispatchGatewayMethodInProcess>[2]>,
+      ) => {
+        childIdentity = readInProcessAgentRuntimeIdentity(options);
+        return { runId: params.idempotencyKey, status: "accepted" } as T;
+      },
+    });
+
+    try {
+      const result = await withPluginRuntimeGatewayRequestScope(
+        {
+          context: makeGatewayContext(),
+          client: externalCliClient(),
+          isWebchatConnect: () => false,
+        },
+        () =>
+          capability.run((current) =>
+            withGatewayToolCallerIdentity(
+              {
+                agentId: current.agentId,
+                sessionKey: current.sessionKey,
+                operationalRunInstance: current.operationalRunInstance,
+                executionIdentityToken: current.executionIdentityToken,
+                workerTurnClaim: current.turnClaim,
+                workerTurnExecutionIdentityCapability: capability,
+              },
+              () =>
+                spawnSubagentDirect(
+                  { task: "inspect worker lineage", context: "isolated", lightContext: true },
+                  withParentExecutionIdentity(
+                    { agentSessionKey: current.sessionKey },
+                    current.executionIdentityToken,
+                  ),
+                ),
+            ),
+          ),
+      );
+
+      expect(result.status).toBe("accepted");
+      expect(validations).toBe(2);
+      expect(childIdentity?.delegatedAuthority).toMatchObject({
+        kind: "worker",
+        turnClaim,
       });
     } finally {
       releaseAgentRunDelegatedAuthority(authority);

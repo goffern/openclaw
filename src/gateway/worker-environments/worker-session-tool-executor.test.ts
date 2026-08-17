@@ -2,8 +2,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import type { ExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
 import type { SessionEntry } from "../../config/sessions.js";
+import {
+  claimAgentRunDelegatedAuthority,
+  releaseAgentRunDelegatedAuthority,
+  type AgentRunDelegatedAuthority,
+} from "../../infra/agent-run-registry.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
@@ -131,6 +137,7 @@ describe("worker session tool topology", () => {
   let identity: WorkerConnectionIdentity;
   let execute: ReturnType<typeof createWorkerSessionToolExecutor>;
   let sourceClaim: ReturnType<WorkerSessionPlacementStore["claimTurn"]>;
+  let delegatedAuthorities: AgentRunDelegatedAuthority[];
   let childSessionKey: string | undefined;
   let spawnOrder: string[];
 
@@ -153,7 +160,16 @@ describe("worker session tool topology", () => {
       },
     });
     placements.authorizeWorkerTurnTools(sourceClaim, ["sessions_send", "sessions_spawn"]);
-    bindWorkerTurnExecutionIdentity(placements, sourceClaim, PARENT_EXECUTION_IDENTITY_TOKEN);
+    delegatedAuthorities = [];
+    const sourceOperationalRun = createOperationalRunInstanceRef(sourceClaim.runId);
+    delegatedAuthorities.push(claimAgentRunDelegatedAuthority(sourceOperationalRun));
+    bindWorkerTurnExecutionIdentity(
+      placements,
+      sourceClaim,
+      PARENT_EXECUTION_IDENTITY_TOKEN,
+      sourceOperationalRun,
+      { agentId: SOURCE.agentId, sessionKey: SOURCE.sessionKey },
+    );
     identity = {
       environmentId: SOURCE.environmentId,
       credentialHash: "credential-hash",
@@ -247,6 +263,9 @@ describe("worker session tool topology", () => {
   });
 
   afterEach(async () => {
+    for (const authority of delegatedAuthorities) {
+      releaseAgentRunDelegatedAuthority(authority);
+    }
     closeOpenClawStateDatabaseForTest();
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -383,6 +402,8 @@ describe("worker session tool topology", () => {
         agentId: SOURCE.agentId,
         sessionKey: SOURCE.sessionKey,
         executionIdentityToken: PARENT_EXECUTION_IDENTITY_TOKEN,
+        operationalRunInstance: expect.objectContaining({ runId: sourceClaim.runId }),
+        workerTurnClaim: sourceClaim,
       }),
     );
   });
@@ -543,7 +564,15 @@ describe("worker session tool topology", () => {
       runId: childClaim.runId,
       createdAt: 2,
     } satisfies ExecutionIdentityAdmissionToken;
-    bindWorkerTurnExecutionIdentity(placements, childClaim, childExecutionIdentityToken);
+    const childOperationalRun = createOperationalRunInstanceRef(childClaim.runId);
+    delegatedAuthorities.push(claimAgentRunDelegatedAuthority(childOperationalRun));
+    bindWorkerTurnExecutionIdentity(
+      placements,
+      childClaim,
+      childExecutionIdentityToken,
+      childOperationalRun,
+      { agentId: CHILD.agentId, sessionKey: spawnedChildKey },
+    );
     const childIdentity: WorkerConnectionIdentity = {
       ...identity,
       environmentId: CHILD.environmentId,

@@ -111,12 +111,10 @@ export function buildExecutionIdentityContext(
   const serializedSpawnFacts = executionIdentitySpawnAdmission({
     operation: "read",
     value: envelope,
-  }) as string | undefined;
-  const [lineageFacts, spawnMissingEvidence] = (
-    serializedSpawnFacts
-      ? executionIdentitySpawnAdmission({ operation: "parse", value: serializedSpawnFacts })
-      : [undefined, []]
-  ) as readonly [Record<string, unknown> | undefined, string[]];
+  });
+  const [lineageFacts, spawnMissingEvidence] = serializedSpawnFacts
+    ? executionIdentitySpawnAdmission({ operation: "parse", value: serializedSpawnFacts })
+    : [undefined, []];
   const lineage = lineageFacts
     ? {
         ...(typeof lineageFacts.parentContextId === "string"
@@ -131,7 +129,7 @@ export function buildExecutionIdentityContext(
         parentAgentPrincipal: {
           kind: "agent" as const,
           domainRef,
-          principalRef: lineageFacts.parentAgentId as string,
+          principalRef: lineageFacts.parentAgentId,
         },
         delegationRef: hmacRef(
           db,
@@ -145,7 +143,7 @@ export function buildExecutionIdentityContext(
             lineageFacts.targetPolicyRefs,
           ]),
         ),
-        depth: lineageFacts.depth as number,
+        depth: lineageFacts.depth,
       }
     : undefined;
   const missingEvidence = uniqueSorted(
