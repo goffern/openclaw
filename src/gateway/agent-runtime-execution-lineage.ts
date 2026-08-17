@@ -12,7 +12,7 @@ export type AgentRuntimeExecutionLineage = {
   externalNativeActions: "observable" | "unsupported";
 };
 
-export type AgentRuntimeExecutionLineageCarrier = {
+type AgentRuntimeExecutionLineageCarrier = {
   executionLineage?: AgentRuntimeExecutionLineage;
 };
 
