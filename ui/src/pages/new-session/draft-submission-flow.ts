@@ -1,7 +1,4 @@
-import type {
-  ProjectsAddResult,
-  SessionsCatalogStartTerminalResult,
-} from "../../../../packages/gateway-protocol/src/index.js";
+import type { ProjectsAddResult } from "../../../../packages/gateway-protocol/src/index.js";
 import { selectApplicationSession } from "../../app/agent-selection.ts";
 import type { ApplicationContext, ApplicationNavigationOptions } from "../../app/context.ts";
 import { navigateWithRouteTransition } from "../../app/route-transition.ts";
@@ -16,9 +13,10 @@ import { deleteCloudDraftSession } from "../../lib/sessions/cloud-startup.ts";
 import { sessionNavigationTarget } from "../../lib/sessions/route-navigation.ts";
 import { normalizeAgentId } from "../../lib/sessions/session-key.ts";
 import { isTerminalAvailable } from "../../lib/terminal-availability.ts";
-import { createManagedWorktree } from "../../lib/worktrees/create-worktree.ts";
 import { buildChatApiAttachments, restoreChatApiAttachments } from "../chat/attachment-api.ts";
+import { releaseChatAttachmentPayloads } from "../chat/attachment-payload-store.ts";
 import { requiresChatModelSetup } from "../chat/chat-model-setup.ts";
+import { CHAT_COMPOSER_DRAFT_STORAGE_ERROR } from "../chat/composer-persistence.ts";
 import { prepareInitialUserMessageHandoff } from "../chat/initial-turn-handoff.ts";
 import { NewSessionAttachmentDraft } from "./attachment-draft.ts";
 import * as catalog from "./catalog-target.ts";
@@ -30,6 +28,7 @@ import {
   type NewSessionVisibility,
 } from "./create-params.ts";
 import type { DraftGatewayState } from "./draft-gateway-state.ts";
+import { NewSessionDraftPersistence } from "./draft-persistence.ts";
 import type { DraftPlaceState } from "./draft-place-state.ts";
 import type {
   DraftSubmissionCallbacks,
@@ -41,6 +40,7 @@ import {
   resolveNewSessionSubmitBlock,
   type NewSessionSubmitBlock,
 } from "./submit-gates.ts";
+import { startNewSessionInTerminal } from "./terminal-start.ts";
 
 export class DraftSubmissionFlow {
   private visibilityValue: NewSessionVisibility = "normal";
@@ -48,11 +48,12 @@ export class DraftSubmissionFlow {
   private submittingValue = false;
   private blockedSubmitGate: string | null = null;
   private submissionOutcomeUnknownValue: SubmissionOutcomeReason | null = null;
-  private errorValue: string | null = null;
+  error: string | null = null;
   private submitRequestToken = 0;
   readonly pendingCloud = new PendingCloudRecoveryState();
   readonly attachmentDraft: NewSessionAttachmentDraft;
   readonly composerTextarea = new NewSessionComposerTextareaController();
+  readonly draftPersistence: NewSessionDraftPersistence;
 
   constructor(
     private readonly gateway: DraftGatewayState,
@@ -60,7 +61,26 @@ export class DraftSubmissionFlow {
     private readonly read: () => DraftSubmissionSnapshot,
     private readonly callbacks: DraftSubmissionCallbacks,
   ) {
-    this.attachmentDraft = new NewSessionAttachmentDraft(callbacks.requestUpdate);
+    this.draftPersistence = new NewSessionDraftPersistence(
+      () => ({
+        message: this.messageValue,
+        attachments: this.attachmentDraft.attachments,
+        incognito: this.visibilityValue === "incognito",
+      }),
+      (message, attachments, resetVisibility) => {
+        releaseChatAttachmentPayloads(this.attachmentDraft.attachments);
+        this.messageValue = message;
+        this.attachmentDraft.restore(attachments);
+        this.visibilityValue = resetVisibility ? "normal" : this.visibilityValue;
+      },
+      () => {
+        this.error = CHAT_COMPOSER_DRAFT_STORAGE_ERROR;
+        this.callbacks.requestUpdate();
+      },
+    );
+    this.attachmentDraft = new NewSessionAttachmentDraft(callbacks.requestUpdate, () =>
+      this.draftPersistence.noteUserMutation(),
+    );
   }
 
   get visibility(): NewSessionVisibility {
@@ -79,37 +99,37 @@ export class DraftSubmissionFlow {
     return this.submissionOutcomeUnknownValue;
   }
 
-  get error(): string | null {
-    return this.errorValue;
-  }
-
   setMessage(message: string) {
     this.messageValue = message;
+    this.draftPersistence.noteUserMutation();
     this.callbacks.requestUpdate();
   }
 
   setVisibility(visibility: NewSessionVisibility) {
     this.visibilityValue = visibility;
     this.callbacks.requestUpdate();
+    void this.draftPersistence
+      .setIncognito(visibility === "incognito")
+      .finally(this.callbacks.requestUpdate);
   }
 
   setError(error: string | null) {
-    if (error === null && this.errorValue === t("newSession.cloudRecoveryUnavailable")) {
-      this.errorValue = null;
+    if (error === null && this.error === t("newSession.cloudRecoveryUnavailable")) {
+      this.error = null;
     } else if (error !== null) {
-      this.errorValue = error;
+      this.error = error;
     }
     this.callbacks.requestUpdate();
   }
 
   clearError() {
-    this.errorValue = null;
+    this.error = null;
     this.callbacks.requestUpdate();
   }
 
   clearErrorIf(error: string) {
-    if (this.errorValue === error) {
-      this.errorValue = null;
+    if (this.error === error) {
+      this.error = null;
       this.callbacks.requestUpdate();
     }
   }
@@ -325,7 +345,7 @@ export class DraftSubmissionFlow {
       this.clearPendingCloudRecovery();
       this.messageValue = "";
     }
-    this.errorValue = null;
+    this.error = null;
     this.callbacks.requestUpdate();
   }
 
@@ -395,7 +415,7 @@ export class DraftSubmissionFlow {
     const requestId = ++this.submitRequestToken;
     const submittedAt = Date.now();
     this.submittingValue = true;
-    this.errorValue = null;
+    this.error = null;
     this.place.browser.close();
     this.callbacks.closeTransientUi();
     this.callbacks.requestUpdate();
@@ -436,18 +456,18 @@ export class DraftSubmissionFlow {
         : undefined;
       const requestAccess = this.submissionAccess(cloudCreateParams ?? createParams);
       if (!requestAccess.allowed) {
-        this.errorValue = requestAccess.reason;
+        this.error = requestAccess.reason;
         return;
       }
       if (cloudProfileId && !pendingCloud && !cloudCreateParams) {
-        this.errorValue = t("newSession.cloudStartFailed", {
+        this.error = t("newSession.cloudStartFailed", {
           error: "cloud recovery storage is unavailable",
         });
         return;
       }
       const submissionCloudRecovery = cloudProfileId ? this.pendingCloud.capture() : null;
       if (cloudProfileId && !submissionCloudRecovery) {
-        this.errorValue = t("newSession.cloudStartFailed", {
+        this.error = t("newSession.cloudStartFailed", {
           error: "cloud recovery storage is unavailable",
         });
         return;
@@ -475,7 +495,7 @@ export class DraftSubmissionFlow {
         if (requestId !== this.submitRequestToken) {
           return;
         }
-        this.errorValue = context.sessions.state.error ?? t("newSession.createFailed");
+        this.error = context.sessions.state.error ?? t("newSession.createFailed");
         return;
       }
       if (cloudProfileId && submissionCloudRecovery) {
@@ -491,7 +511,7 @@ export class DraftSubmissionFlow {
           if (cleanupError) {
             this.pendingCloud.promoteToDispatching(result.key);
             this.pendingCloud.retryAllowed = true;
-            this.errorValue = t("newSession.cloudStartFailed", { error: cleanupError });
+            this.error = t("newSession.cloudStartFailed", { error: cleanupError });
             this.callbacks.requestUpdate();
           } else {
             this.clearPendingCloudRecovery();
@@ -504,7 +524,7 @@ export class DraftSubmissionFlow {
           ownsSubmissionRecovery()
         ) {
           if (!this.pendingCloud.promoteToDispatching(result.key)) {
-            this.errorValue = t("newSession.cloudStartFailed", {
+            this.error = t("newSession.cloudStartFailed", {
               error: "cloud recovery storage is unavailable",
             });
             return;
@@ -512,7 +532,7 @@ export class DraftSubmissionFlow {
         }
         const recovery = this.pendingCloud.capture();
         if (!recovery || recovery.phase === "creating") {
-          this.errorValue = t("newSession.cloudStartFailed", {
+          this.error = t("newSession.cloudStartFailed", {
             error: "cloud recovery storage is unavailable",
           });
           return;
@@ -526,6 +546,18 @@ export class DraftSubmissionFlow {
           recovering: pendingCloud,
           createdAt: submittedAt,
         });
+        if (
+          requestId !== this.submitRequestToken ||
+          !isSubmissionLifecycleCurrent() ||
+          !this.pendingCloud.owns(
+            submissionGatewayUrl,
+            submissionRecoveryScope,
+            recovery.sessionKey,
+          )
+        ) {
+          return;
+        }
+        await this.draftPersistence.clearSubmittedDraft();
         if (
           requestId !== this.submitRequestToken ||
           !isSubmissionLifecycleCurrent() ||
@@ -579,6 +611,10 @@ export class DraftSubmissionFlow {
           { runId: result.initialRun.runId, messageSeq: result.initialRun.messageSeq },
         );
       }
+      await this.draftPersistence.clearSubmittedDraft();
+      if (requestId !== this.submitRequestToken) {
+        return;
+      }
       this.attachmentDraft.clearAfterSubmit(!handedOffAttachments);
       if (requestId !== this.submitRequestToken) {
         return;
@@ -601,7 +637,7 @@ export class DraftSubmissionFlow {
       );
     } catch (error) {
       if (requestId === this.submitRequestToken && this.gateway.client === submissionClient) {
-        this.errorValue = error instanceof Error ? error.message : String(error);
+        this.error = error instanceof Error ? error.message : String(error);
       }
     } finally {
       if (requestId === this.submitRequestToken) {
@@ -624,41 +660,38 @@ export class DraftSubmissionFlow {
     const requestId = ++this.submitRequestToken;
     const initialMessage = this.messageValue.trim();
     this.submittingValue = true;
-    this.errorValue = null;
+    this.error = null;
     this.place.browser.close();
     this.callbacks.closeTransientUi();
     this.callbacks.requestUpdate();
     try {
-      let cwd = this.place.folder.trim() || this.place.workspacePath();
-      if (this.place.worktree) {
-        const created = await createManagedWorktree(client, {
-          repoRoot: cwd,
-          name: this.place.worktreeName,
-          baseRef: this.place.baseRef,
-        });
-        if (requestId !== this.submitRequestToken || this.gateway.client !== client) {
-          return;
-        }
-        cwd = created.path;
-      }
-      const result = await client.request<SessionsCatalogStartTerminalResult>(
-        "sessions.catalog.startTerminal",
+      const result = await startNewSessionInTerminal(
+        client,
         {
           catalogId,
-          ...(this.place.execNode ? { hostId: `node:${this.place.execNode}` } : {}),
           agentId,
-          cwd,
-          ...(initialMessage ? { initialMessage } : {}),
+          cwd: this.place.folder.trim() || this.place.workspacePath(),
+          execNode: this.place.execNode,
+          initialMessage,
+          worktree: this.place.worktree,
+          worktreeName: this.place.worktreeName,
+          baseRef: this.place.baseRef,
         },
+        () => requestId === this.submitRequestToken && this.gateway.client === client,
       );
+      if (!result || requestId !== this.submitRequestToken || this.gateway.client !== client) {
+        return;
+      }
+      await this.draftPersistence.clearSubmittedDraft();
       if (requestId !== this.submitRequestToken || this.gateway.client !== client) {
         return;
       }
       this.messageValue = "";
+      this.attachmentDraft.clearAfterSubmit(true);
       openTerminalSessionInTerminal(result.sessionId);
     } catch (error) {
       if (requestId === this.submitRequestToken && this.gateway.client === client) {
-        this.errorValue = error instanceof Error ? error.message : String(error);
+        this.error = error instanceof Error ? error.message : String(error);
       }
     } finally {
       if (requestId === this.submitRequestToken) {
@@ -669,6 +702,7 @@ export class DraftSubmissionFlow {
   }
 
   disconnect() {
+    this.draftPersistence.disconnect();
     this.attachmentDraft.reset({ release: true });
     this.composerTextarea.disconnect();
   }
@@ -711,6 +745,6 @@ export class DraftSubmissionFlow {
     });
     this.visibilityValue = recovery.createParams?.incognito === true ? "incognito" : "normal";
     this.messageValue = recovery.message;
-    this.attachmentDraft.replace(restoreChatApiAttachments(recovery.attachments));
+    this.attachmentDraft.restore(restoreChatApiAttachments(recovery.attachments));
   }
 }
